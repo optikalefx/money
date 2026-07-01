@@ -120,12 +120,34 @@ export const listRecentTransactions = query({
 				classification: transaction.classification,
 				classificationSource: transaction.classificationSource,
 				source: transaction.source,
+				...(await sourceAccountForTransaction(ctx, transaction)),
 				removed: transaction.removed,
 				amazonItems: await amazonItemsForTransaction(ctx, transaction)
 			}))
 		);
 	}
 });
+
+// The connected account a transaction came from, surfaced next to the source ("plaid") in the
+// review queue so a row reads e.g. "plaid · Chase ••1234" instead of a bare provider name.
+async function sourceAccountForTransaction(
+	ctx: QueryCtx,
+	transaction: { accountId?: Id<'accounts'> }
+): Promise<{ institutionName: string | null; accountName: string | null; accountMask: string | null }> {
+	if (!transaction.accountId) {
+		return { institutionName: null, accountName: null, accountMask: null };
+	}
+	const account = await ctx.db.get(transaction.accountId);
+	if (!account) {
+		return { institutionName: null, accountName: null, accountMask: null };
+	}
+	const item = await ctx.db.get(account.plaidItemId);
+	return {
+		institutionName: item?.institutionName ?? null,
+		accountName: account.name,
+		accountMask: account.mask ?? null
+	};
+}
 
 // The primary (first) purchased item with an ASIN for an Amazon transaction, used to group
 // recurring Amazon spend by item instead of by the shared "amazon" merchant.

@@ -21,6 +21,9 @@
 		classification: Classification;
 		classificationSource: string;
 		source: string;
+		institutionName?: string | null;
+		accountName?: string | null;
+		accountMask?: string | null;
 		removed?: boolean;
 		amazonItems?: Array<{
 			title: string;
@@ -274,6 +277,17 @@
 		}
 		if (transaction.categorySlug) return slugName(transaction.categorySlug);
 		return categoryFor(transaction) || 'Uncategorized';
+	}
+
+	// The source line under a merchant in the review queue: the provider ("plaid") plus the
+	// connected account it came from — institution name and, when present, the last 4 (useful
+	// for telling credit cards apart). Falls back to a bare provider when no account is linked.
+	function sourceLabel(transaction: TransactionRow) {
+		const accountLabel = transaction.institutionName ?? transaction.accountName;
+		const parts = [transaction.source];
+		if (accountLabel) parts.push(accountLabel);
+		const label = parts.join(' · ');
+		return transaction.accountMask ? `${label} ••${transaction.accountMask}` : label;
 	}
 
 	function providerCategoryFor(transaction: {
@@ -824,7 +838,7 @@
 										<strong use:tooltip={merchant === transaction.name ? undefined : transaction.name}
 											>{merchant}</strong
 										>
-										<span class="source-line">{transaction.source}</span>
+										<span class="source-line">{sourceLabel(transaction)}</span>
 									{/if}
 									{#if transaction.pending}
 										<span class="pending-chip">Pending</span>
