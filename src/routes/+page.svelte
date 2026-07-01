@@ -2,6 +2,7 @@
 	import { useAction, useMutation, useQuery } from 'convex-svelte';
 	import { api } from '../convex/_generated/api.js';
 	import type { Id } from '../convex/_generated/dataModel.js';
+	import { tooltip, truncateWords } from '$lib/tooltip';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic' | 'unreviewed';
 	type MerchantClassification = 'known_recurring' | 'expected';
@@ -632,13 +633,14 @@
 								<td data-label="Merchant">
 									{#if transaction.amazonItems && transaction.amazonItems.length}
 										{#each transaction.amazonItems as item, i (i)}
-											<strong
-												>{item.title}{#if item.quantity && item.quantity > 1}
+											{@const short = truncateWords(item.title, 6)}
+											<strong use:tooltip={short === item.title ? undefined : item.title}
+												>{short}{#if item.quantity && item.quantity > 1}
 													×{item.quantity}{/if}</strong
 											>
 										{/each}
 										<span class="source-line"
-											>Amazon · {transaction.merchantName ?? transaction.name}</span
+											>Gmail · {transaction.merchantName ?? transaction.name}</span
 										>
 									{:else}
 										<strong>{transaction.merchantName ?? transaction.name}</strong>

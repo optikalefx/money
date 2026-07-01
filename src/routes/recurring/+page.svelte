@@ -2,6 +2,7 @@
 	import { useMutation, useQuery } from 'convex-svelte';
 	import { api } from '../../convex/_generated/api.js';
 	import type { Id } from '../../convex/_generated/dataModel.js';
+	import { tooltip, truncateWords } from '$lib/tooltip';
 
 	type RecurringRow = {
 		id: Id<'transactions'>;
@@ -250,10 +251,13 @@
 								<td data-label="Merchant">
 									{#if transaction.amazonItems && transaction.amazonItems.length}
 										{#each transaction.amazonItems as item, i (i)}
-											<strong>{item.title}</strong>
+											{@const short = truncateWords(item.title, 6)}
+											<strong use:tooltip={short === item.title ? undefined : item.title}
+												>{short}</strong
+											>
 										{/each}
 										<span class="source-line"
-											>Amazon · {transaction.merchantName ?? transaction.name}</span
+											>Gmail · {transaction.merchantName ?? transaction.name}</span
 										>
 									{:else}
 										<strong>{transaction.merchantName ?? transaction.name}</strong>

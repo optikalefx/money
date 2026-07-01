@@ -178,11 +178,11 @@ Build a personal money tracking app that separates expected spending from unplan
 
 ## Suggested Build Order
 
-- [ ] Milestone 1: Data model, mock transactions, transaction list, and manual marking.
-- [ ] Milestone 2: Rule engine and dynamic dashboard using seeded/mock data.
-- [ ] Milestone 3: Plaid connect, reconnect, and transaction sync.
-- [ ] Milestone 4: Gmail connect and Amazon order parsing.
-- [ ] Milestone 5: Plaid/Amazon matching and duplicate handling.
+- [x] Milestone 1: Data model, transaction list, and manual marking. (Built against live Plaid data.)
+- [x] Milestone 2: Rule engine and dynamic dashboard.
+- [~] Milestone 3: Plaid connect and transaction sync done; reconnect/update-mode still pending.
+- [x] Milestone 4: Gmail connect and Amazon order parsing (incl. ASIN extraction).
+- [~] Milestone 5: Plaid/Amazon matching done; duplicate/double-count handling still pending.
 - [ ] Milestone 6: AI daily categorization and review queue.
 - [ ] Milestone 7: Budget map, recurring expense management, polish, tests, and deployment hardening.
 
@@ -196,19 +196,33 @@ Build a personal money tracking app that separates expected spending from unplan
 - [x] Transaction marking UI is implemented (recurring/expected merchant rules, expected/transfer category rules, unmark).
 - [x] Merchant and category rules auto-classify on sync (`classifyFromRules`).
 - [x] First Dynamic expenses dashboard is live (dynamic total, by-category, top-merchants, review queue) plus a recurring page.
-- [x] Gmail OAuth connect + manual Amazon sync + order/transaction matching implemented (parser item extraction still pending).
+- [x] Gmail OAuth connect + manual Amazon sync + order/transaction matching implemented and working on live data.
+- [x] Amazon email parser extracts order ID, net total, and per-item title/qty/price + ASIN (99% total coverage; 26/29 recent Amazon charges enriched with real item names).
+- [x] Matched Amazon items enrich the Plaid transaction in the review queue (shows the item bought, not "Amazon"); long names truncate to 6 words with a hover tooltip (tippy.js).
+- [x] Amazon item classification is keyed on ASIN: marking a row creates/updates an `amazonItemRules` entry and applies it to all transactions sharing that ASIN; new Gmail matches auto-apply the rule.
+- [x] Recurring page groups Amazon recurring spend per item/ASIN with per-item Unmark, visually identical to merchant rows.
+- [x] Plaid re-sync preserves existing classification/kind (no longer clobbers manual, category-rule, or ASIN-rule results).
 - [ ] Reconnect/update mode for Plaid is not implemented yet.
 - [ ] Scheduled Plaid and Gmail sync are not implemented yet.
-- [x] Amazon email item-name parsing tuned against real emails (order ID, net total, item title/qty/price; 99% total coverage, live matching to Plaid working).
 
 ## Next Phase
 
-- [ ] Complete Google Cloud OAuth setup and set Convex env vars (see Phase 5 setup steps), then connect Gmail and run a live Amazon sync.
-- [x] Tune the Amazon email parser against real order emails to extract individual item names/prices into `amazonOrderItems`.
-- [ ] Break Amazon order items out into the dynamic dashboard math per the confirmed decision.
-- [x] Add unmark support for Amazon ASIN rules. (`/recurring` groups Amazon recurring spend per item/ASIN as its own row; Unmark calls `unmarkAmazonItem` to delete the rule and reset transactions — visually identical to unmarking a merchant.)
-- [ ] Add app-level duplicate detection so a matched Amazon order does not double-count against its Plaid transaction.
-- [ ] Add scheduled daily Plaid + Gmail sync (Convex cron), then Plaid reconnect/update mode.
+The Plaid + Gmail/Amazon workflow is usable end-to-end on live data (connect, sync, review,
+classify by merchant/category/ASIN, recurring management). Remaining work, roughly in priority order:
+
+- [ ] Automate syncing: scheduled daily Plaid + Gmail sync via Convex cron (currently manual "Sync now" / "Sync Amazon" buttons only).
+- [ ] Plaid reconnect / update-mode flow for when an item breaks (Phase 3).
+- [ ] App-level duplicate detection so a matched Amazon order doesn't double-count against its Plaid charge (44 matches > 29 charges today; same-priced orders can share a charge).
+- [ ] Break Amazon order items into the dynamic dashboard math (per the confirmed decision that item detail should affect category totals).
+- [ ] Dashboard depth (Phase 9/10): trend chart, expected-vs-dynamic comparison, CSV export, category drill-down, budget/recurring map with expected-vs-observed variance.
+- [ ] AI daily categorization (Phase 7): `aiClassifications` table + OpenAI pass for still-`dynamic` transactions, low-confidence → review queue.
+- [ ] Tests (Phase 12): merchant/Plaid normalization, Amazon parser fixtures, classification precedence, Plaid↔Amazon dedupe.
+
+### Known limitations to revisit
+
+- Multi-item Amazon orders attribute recurring totals to the primary (first) item's ASIN; single-item Subscribe & Save is exact.
+- Amazon history predates Plaid's ~7-week transaction window, so older orders stay unmatched (data limitation, not a bug).
+- `tippy.js` is v6 with some npm-audit advisories (transitive, not runtime-critical).
 
 ## Open Decisions
 
