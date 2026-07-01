@@ -370,6 +370,9 @@
 				Dynamic is the default. Mark a merchant as recurring or expected once, and future matching
 				transactions can inherit that merchant-level rule.
 			</p>
+			<p class="hero-nav">
+				<a class="nav-link" href="/recurring">View recurring transactions →</a>
+			</p>
 		</div>
 
 		<div class="connection-panel organic-surface">
@@ -438,11 +441,11 @@
 			<strong>{formatAmount(dynamicTotal)}</strong>
 			<p>{dynamicRows.length} transactions in {selectedMonth}</p>
 		</div>
-		<div class="organic-card">
+		<a class="organic-card card-link" href="/recurring">
 			<span class="metric-label">Recurring</span>
 			<strong>{recurringCount}</strong>
-			<p>Merchant-rule rows in the selected period</p>
-		</div>
+			<p>Merchant-rule rows in the selected period · view all →</p>
+		</a>
 		<div class="organic-card">
 			<span class="metric-label">Loaded rows</span>
 			<strong>{allTransactions.length}</strong>
@@ -669,6 +672,34 @@
 		max-width: 44rem;
 		color: var(--color-muted-foreground);
 		font-size: clamp(1.08rem, 2vw, 1.28rem);
+	}
+
+	.hero-nav {
+		margin-top: 1.25rem;
+	}
+
+	.nav-link {
+		font-weight: 900;
+		color: var(--color-primary);
+		text-decoration: none;
+	}
+
+	.nav-link:hover {
+		text-decoration: underline;
+	}
+
+	.card-link {
+		display: block;
+		color: inherit;
+		text-decoration: none;
+		transition:
+			transform 220ms ease,
+			box-shadow 220ms ease;
+	}
+
+	.card-link:hover {
+		transform: translateY(-0.15rem);
+		box-shadow: var(--shadow-soft);
 	}
 
 	.connection-panel,

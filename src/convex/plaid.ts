@@ -183,6 +183,155 @@ export const getDynamicDashboard = query({
 	}
 });
 
+export const getRecurringSummary = query({
+	args: {},
+	handler: async (ctx) => {
+		const rows = await ctx.db
+			.query('transactions')
+			.withIndex('by_classification_and_date', (q) => q.eq('classification', 'known_recurring'))
+			.order('desc')
+			.take(1000);
+		const active = rows.filter((transaction) => !transaction.removed);
+		const expenses = active.filter((transaction) => transaction.kind === 'expense');
+		const total = expenses.reduce((sum, transaction) => sum + transaction.amount, 0);
+		const byCategory = summarizeBy(
+			expenses,
+			(transaction) =>
+				transaction.userCategory ??
+				transaction.categoryDetailed ??
+				transaction.categoryPrimary ??
+				'Uncategorized'
+		);
+
+		const merchantTotals = new Map<
+			string,
+			{
+				normalizedMerchant: string;
+				label: string;
+				total: number;
+				count: number;
+				months: Set<string>;
+			}
+		>();
+		for (const transaction of expenses) {
+			const key = transaction.normalizedMerchant;
+			const existing = merchantTotals.get(key) ?? {
+				normalizedMerchant: key,
+				label: transaction.merchantName ?? transaction.name,
+				total: 0,
+				count: 0,
+				months: new Set<string>()
+			};
+			existing.total += transaction.amount;
+			existing.count += 1;
+			existing.months.add(transaction.date.slice(0, 7));
+			merchantTotals.set(key, existing);
+		}
+		const byMerchant = [...merchantTotals.values()]
+			.sort((a, b) => b.total - a.total)
+			.map((merchant) => ({
+				normalizedMerchant: merchant.normalizedMerchant,
+				label: merchant.label,
+				total: merchant.total,
+				count: merchant.count,
+				monthly: merchant.total / Math.max(merchant.months.size, 1)
+			}));
+		// Recurring monthly cost = sum of each merchant's average per-month spend.
+		const monthlyTotal = byMerchant.reduce((sum, merchant) => sum + merchant.monthly, 0);
+
+		return {
+			total,
+			monthlyTotal,
+			count: active.length,
+			expenseCount: expenses.length,
+			byCategory: byCategory.slice(0, 12),
+			byMerchant: byMerchant.slice(0, 12)
+		};
+	}
+});
+
+export const getRecurringTransactions = query({
+	args: {
+		startDate: v.optional(v.string()),
+		endDate: v.optional(v.string())
+	},
+	handler: async (ctx, args) => {
+		const rows = await ctx.db
+			.query('transactions')
+			.withIndex('by_classification_and_date', (q) => {
+				const withClass = q.eq('classification', 'known_recurring');
+				if (args.startDate && args.endDate) {
+					return withClass.gte('date', args.startDate).lte('date', args.endDate);
+				}
+				if (args.startDate) return withClass.gte('date', args.startDate);
+				if (args.endDate) return withClass.lte('date', args.endDate);
+				return withClass;
+			})
+			.order('desc')
+			.take(500);
+
+		return rows
+			.filter((transaction) => !transaction.removed)
+			.map((transaction) => ({
+				id: transaction._id,
+				date: transaction.date,
+				name: transaction.name,
+				merchantName: transaction.merchantName ?? null,
+				amount: transaction.amount,
+				kind: transaction.kind,
+				pending: transaction.pending,
+				categoryPrimary: transaction.categoryPrimary ?? null,
+				categoryDetailed: transaction.categoryDetailed ?? null,
+				userCategory: transaction.userCategory ?? null,
+				classificationSource: transaction.classificationSource,
+				source: transaction.source
+			}));
+	}
+});
+
+export const unmarkRecurring = mutation({
+	args: {
+		normalizedMerchant: v.string()
+	},
+	handler: async (ctx, args) => {
+		const now = Date.now();
+		const rules = await ctx.db
+			.query('merchantRules')
+			.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', args.normalizedMerchant))
+			.take(10);
+
+		for (const rule of rules) {
+			if (rule.classification === 'known_recurring') {
+				await ctx.db.delete(rule._id);
+			}
+		}
+
+		const matchingTransactions = await ctx.db
+			.query('transactions')
+			.withIndex('by_normalizedMerchant', (q) =>
+				q.eq('normalizedMerchant', args.normalizedMerchant)
+			)
+			.take(500);
+		let updated = 0;
+
+		for (const matchingTransaction of matchingTransactions) {
+			if (matchingTransaction.removed) continue;
+			if (matchingTransaction.classification !== 'known_recurring') continue;
+
+			await ctx.db.patch(matchingTransaction._id, {
+				classification: 'dynamic',
+				classificationSource: 'default',
+				classificationConfidence: undefined,
+				reviewedAt: now,
+				updatedAt: now
+			});
+			updated += 1;
+		}
+
+		return { ok: true, merchant: args.normalizedMerchant, updated };
+	}
+});
+
 export const markTransaction = mutation({
 	args: {
 		transactionId: v.id('transactions'),
