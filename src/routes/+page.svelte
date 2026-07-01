@@ -54,10 +54,6 @@
 		style: 'currency',
 		currency: 'USD'
 	});
-	const percent = new Intl.NumberFormat('en-US', {
-		style: 'percent',
-		maximumFractionDigits: 0
-	});
 
 	const allTransactions = $derived((transactions.data ?? []) as TransactionRow[]);
 	const visibleTransactions = $derived.by(() => {
@@ -120,9 +116,6 @@
 				transaction.date <= monthEnd
 		).length
 	);
-	const maxCategoryTotal = $derived(Math.max(...dynamicByCategory.map((row) => row.total), 1));
-	const maxMerchantTotal = $derived(Math.max(...dynamicByMerchant.map((row) => row.total), 1));
-
 	function lastDayOfMonth(month: string) {
 		const [year, monthIndex] = month.split('-').map(Number);
 		const day = new Date(year, monthIndex, 0).getDate();
@@ -469,9 +462,6 @@
 							<strong>{row.label}</strong>
 							<span>{row.count} rows</span>
 						</div>
-						<div class="bar-track" aria-hidden="true">
-							<span style={`width: ${percent.format(row.total / maxCategoryTotal)}`}></span>
-						</div>
 						<b>{formatAmount(row.total)}</b>
 					</div>
 				{:else}
@@ -494,9 +484,6 @@
 						<div>
 							<strong>{row.label}</strong>
 							<span>{row.count} rows</span>
-						</div>
-						<div class="bar-track" aria-hidden="true">
-							<span style={`width: ${percent.format(row.total / maxMerchantTotal)}`}></span>
 						</div>
 						<b>{formatAmount(row.total)}</b>
 					</div>
@@ -881,7 +868,7 @@
 
 	.bar-row {
 		display: grid;
-		grid-template-columns: minmax(8rem, 1fr) minmax(8rem, 1.2fr) max-content;
+		grid-template-columns: minmax(8rem, 1fr) max-content;
 		gap: 0.8rem;
 		align-items: center;
 	}
@@ -895,20 +882,6 @@
 	.source-line {
 		color: var(--color-muted-foreground);
 		font-size: 0.82rem;
-	}
-
-	.bar-track {
-		height: 0.7rem;
-		overflow: hidden;
-		background: rgb(240 235 229 / 95%);
-		border-radius: var(--radius-pill);
-	}
-
-	.bar-track span {
-		display: block;
-		height: 100%;
-		background: linear-gradient(90deg, var(--color-primary), var(--color-secondary));
-		border-radius: inherit;
 	}
 
 	.account-grid {
