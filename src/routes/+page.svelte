@@ -5,7 +5,6 @@
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic' | 'unreviewed';
 	type MerchantClassification = 'known_recurring' | 'expected';
-	type ClassificationFilter = Classification | 'all';
 	type TransactionRow = {
 		id: Id<'transactions'>;
 		date: string;
@@ -27,7 +26,6 @@
 	const initialMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
 
 	let selectedMonth = $state(initialMonth);
-	let classificationFilter = $state<ClassificationFilter>('dynamic');
 	let searchTerm = $state('');
 	let isConnecting = $state(false);
 	let isSyncing = $state(false);
@@ -65,9 +63,7 @@
 			if (transaction.removed) return false;
 			if (transaction.kind !== 'expense') return false;
 			if (transaction.date < monthStart || transaction.date > monthEnd) return false;
-			if (classificationFilter !== 'all' && classification !== classificationFilter) {
-				return false;
-			}
+			if (classification !== 'dynamic') return false;
 			if (!term) return true;
 
 			return [
@@ -124,6 +120,10 @@
 
 	function formatAmount(amount: number) {
 		return currency.format(amount);
+	}
+
+	function filterBySearch(label: string) {
+		searchTerm = searchTerm === label ? '' : label;
 	}
 
 	function formatDate(timestamp: number | null) {
@@ -413,15 +413,6 @@
 			<span>Month</span>
 			<input type="month" bind:value={selectedMonth} />
 		</label>
-		<label>
-			<span>Class</span>
-			<select bind:value={classificationFilter}>
-				<option value="all">All</option>
-				<option value="dynamic">Dynamic</option>
-				<option value="expected">Expected</option>
-				<option value="known_recurring">Known recurring</option>
-			</select>
-		</label>
 		<label class="search-field">
 			<span>Search</span>
 			<input type="search" bind:value={searchTerm} placeholder="Merchant, category, notes" />
@@ -457,13 +448,19 @@
 
 			<div class="bar-list">
 				{#each dynamicByCategory as row (row.label)}
-					<div class="bar-row">
+					<button
+						type="button"
+						class="bar-row"
+						class:is-active={searchTerm === row.label}
+						title={`Filter review queue by ${row.label}`}
+						onclick={() => filterBySearch(row.label)}
+					>
 						<div>
 							<strong>{row.label}</strong>
 							<span>{row.count} rows</span>
 						</div>
 						<b>{formatAmount(row.total)}</b>
-					</div>
+					</button>
 				{:else}
 					<div class="empty-state">No dynamic categories for this month.</div>
 				{/each}
@@ -480,13 +477,19 @@
 
 			<div class="bar-list">
 				{#each dynamicByMerchant as row (row.label)}
-					<div class="bar-row">
+					<button
+						type="button"
+						class="bar-row"
+						class:is-active={searchTerm === row.label}
+						title={`Filter review queue by ${row.label}`}
+						onclick={() => filterBySearch(row.label)}
+					>
 						<div>
 							<strong>{row.label}</strong>
 							<span>{row.count} rows</span>
 						</div>
 						<b>{formatAmount(row.total)}</b>
-					</div>
+					</button>
 				{:else}
 					<div class="empty-state">No dynamic merchants for this month.</div>
 				{/each}
@@ -570,7 +573,9 @@
 									<span class={`class-chip ${effectiveClassification(transaction)}`}>
 										{classificationLabel(effectiveClassification(transaction))}
 									</span>
-									<span class="source-line">{transaction.classificationSource}</span>
+									{#if transaction.classificationSource !== 'default'}
+										<span class="source-line">{transaction.classificationSource}</span>
+									{/if}
 								</td>
 								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
 								>
@@ -738,7 +743,7 @@
 
 	.control-bar {
 		display: grid;
-		grid-template-columns: minmax(10rem, 0.7fr) minmax(12rem, 0.8fr) minmax(16rem, 1.5fr);
+		grid-template-columns: minmax(10rem, 0.7fr) minmax(16rem, 2fr);
 		gap: 1rem;
 		margin-bottom: 1rem;
 		padding: 1rem;
@@ -753,8 +758,7 @@
 		font-weight: 800;
 	}
 
-	input,
-	select {
+	input {
 		width: 100%;
 		min-height: 2.8rem;
 		padding: 0.65rem 0.85rem;
@@ -871,11 +875,43 @@
 		grid-template-columns: minmax(8rem, 1fr) max-content;
 		gap: 0.8rem;
 		align-items: center;
+		width: 100%;
+		margin: 0;
+		padding: 0.5rem 0.65rem;
+		font: inherit;
+		color: inherit;
+		text-align: left;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 1rem;
+		cursor: pointer;
+		transition:
+			background-color 200ms ease,
+			border-color 200ms ease;
+	}
+
+	.bar-row:hover {
+		background: rgb(230 220 205 / 45%);
+	}
+
+	.bar-row.is-active {
+		background: rgb(93 112 82 / 12%);
+		border-color: rgb(93 112 82 / 35%);
+	}
+
+	.bar-row > div {
+		min-width: 0;
 	}
 
 	.bar-row strong,
 	.source-line {
 		display: block;
+	}
+
+	.bar-row strong {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.bar-row span,
@@ -919,7 +955,7 @@
 	}
 
 	.date-col {
-		width: 6%;
+		width: 7rem;
 	}
 
 	.merchant-col {
@@ -927,7 +963,7 @@
 	}
 
 	.category-col {
-		width: 30%;
+		width: 28%;
 	}
 
 	.class-col {
@@ -935,11 +971,11 @@
 	}
 
 	.amount-col {
-		width: 8%;
+		width: 7rem;
 	}
 
 	.actions-col {
-		width: 30%;
+		width: 28%;
 	}
 
 	th,
@@ -950,6 +986,13 @@
 		vertical-align: middle;
 		overflow-wrap: anywhere;
 		word-break: normal;
+	}
+
+	th:first-child,
+	td:first-child,
+	.amount-column {
+		white-space: nowrap;
+		overflow-wrap: normal;
 	}
 
 	th {

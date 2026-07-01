@@ -463,10 +463,22 @@
 		text-transform: uppercase;
 	}
 
+	.bar-row > div,
+	.merchant-info {
+		min-width: 0;
+	}
+
 	.bar-row strong,
 	.merchant-info strong,
 	.source-line {
 		display: block;
+	}
+
+	.bar-row strong,
+	.merchant-info strong {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.bar-row span,
@@ -488,19 +500,19 @@
 	}
 
 	.date-col {
-		width: 12%;
+		width: 7rem;
 	}
 
 	.merchant-col {
-		width: 33%;
+		width: 34%;
 	}
 
 	.category-col {
-		width: 40%;
+		width: 42%;
 	}
 
 	.amount-col {
-		width: 15%;
+		width: 7rem;
 	}
 
 	th,
@@ -511,6 +523,13 @@
 		vertical-align: middle;
 		overflow-wrap: anywhere;
 		word-break: normal;
+	}
+
+	th:first-child,
+	td:first-child,
+	.amount-column {
+		white-space: nowrap;
+		overflow-wrap: normal;
 	}
 
 	th {
