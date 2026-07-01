@@ -4,7 +4,7 @@
 	import type { Id } from '../convex/_generated/dataModel.js';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic' | 'unreviewed';
-	type ManualClassification = Exclude<Classification, 'unreviewed'>;
+	type MerchantClassification = 'known_recurring' | 'expected';
 	type ClassificationFilter = Classification | 'all';
 	type TransactionRow = {
 		id: Id<'transactions'>;
@@ -27,14 +27,13 @@
 	const initialMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
 
 	let selectedMonth = $state(initialMonth);
-	let classificationFilter = $state<ClassificationFilter>('unreviewed');
+	let classificationFilter = $state<ClassificationFilter>('dynamic');
 	let searchTerm = $state('');
 	let isConnecting = $state(false);
 	let isSyncing = $state(false);
 	let markingTransactionId = $state<string | null>(null);
 	let statusMessage = $state('');
 	let errorMessage = $state('');
-	let createRuleByTransaction = $state<Record<string, boolean>>({});
 
 	const monthStart = $derived(`${selectedMonth}-01`);
 	const monthEnd = $derived(lastDayOfMonth(selectedMonth));
@@ -48,6 +47,8 @@
 	const exchangePublicToken = useAction(api.plaidActions.exchangePublicToken);
 	const syncAllItems = useAction(api.plaidActions.syncAllItems);
 	const markTransactionMutation = useMutation(api.plaid.markTransaction);
+	const markCategoryExpectedMutation = useMutation(api.plaid.markCategoryExpected);
+	const markCategoryTransferMutation = useMutation(api.plaid.markCategoryTransfer);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',
@@ -63,9 +64,12 @@
 		const term = searchTerm.trim().toLowerCase();
 
 		return allTransactions.filter((transaction) => {
+			const classification = effectiveClassification(transaction);
+
 			if (transaction.removed) return false;
+			if (transaction.kind !== 'expense') return false;
 			if (transaction.date < monthStart || transaction.date > monthEnd) return false;
-			if (classificationFilter !== 'all' && transaction.classification !== classificationFilter) {
+			if (classificationFilter !== 'all' && classification !== classificationFilter) {
 				return false;
 			}
 			if (!term) return true;
@@ -86,7 +90,7 @@
 			(transaction) =>
 				!transaction.removed &&
 				transaction.kind === 'expense' &&
-				transaction.classification === 'dynamic' &&
+				effectiveClassification(transaction) === 'dynamic' &&
 				transaction.date >= monthStart &&
 				transaction.date <= monthEnd
 		)
@@ -107,11 +111,11 @@
 	const dynamicByMerchant = $derived(
 		summarizeBy(dynamicRows, (transaction) => transaction.merchantName ?? transaction.name)
 	);
-	const unreviewedCount = $derived(
+	const recurringCount = $derived(
 		allTransactions.filter(
 			(transaction) =>
 				!transaction.removed &&
-				transaction.classification === 'unreviewed' &&
+				effectiveClassification(transaction) === 'known_recurring' &&
 				transaction.date >= monthStart &&
 				transaction.date <= monthEnd
 		).length
@@ -143,6 +147,12 @@
 		return value.replace('_', ' ');
 	}
 
+	function effectiveClassification(
+		transaction: TransactionRow
+	): Exclude<Classification, 'unreviewed'> {
+		return transaction.classification === 'unreviewed' ? 'dynamic' : transaction.classification;
+	}
+
 	function categoryFor(transaction: {
 		userCategory?: string | null;
 		categoryDetailed: string | null;
@@ -151,6 +161,13 @@
 		return (
 			transaction.userCategory ?? transaction.categoryDetailed ?? transaction.categoryPrimary ?? ''
 		);
+	}
+
+	function providerCategoryFor(transaction: {
+		categoryDetailed: string | null;
+		categoryPrimary: string | null;
+	}) {
+		return transaction.categoryDetailed ?? transaction.categoryPrimary ?? '';
 	}
 
 	function loadPlaidScript() {
@@ -245,7 +262,7 @@
 			categoryDetailed: string | null;
 			categoryPrimary: string | null;
 		},
-		classification: ManualClassification
+		classification: MerchantClassification
 	) {
 		markingTransactionId = transaction.id;
 		errorMessage = '';
@@ -255,13 +272,65 @@
 			await markTransactionMutation({
 				transactionId: transaction.id,
 				classification,
-				createMerchantRule: createRuleByTransaction[transaction.id] ?? false,
+				createMerchantRule: true,
 				ruleMatchType: 'exact',
 				...(category ? { category } : {})
 			});
-			statusMessage = `${transaction.merchantName ?? transaction.name} marked ${classificationLabel(classification)}.`;
+			statusMessage = `${transaction.merchantName ?? transaction.name} will now be treated as ${classificationLabel(classification)}.`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to mark transaction.';
+		} finally {
+			markingTransactionId = null;
+		}
+	}
+
+	async function markExpectedCategory(transaction: {
+		id: Id<'transactions'>;
+		categoryDetailed: string | null;
+		categoryPrimary: string | null;
+	}) {
+		markingTransactionId = transaction.id;
+		errorMessage = '';
+
+		try {
+			const category = providerCategoryFor(transaction);
+			if (!category) {
+				throw new Error('This transaction does not have a category to use as a rule.');
+			}
+
+			await markCategoryExpectedMutation({
+				transactionId: transaction.id
+			});
+			statusMessage = `${category} will now be treated as expected.`;
+		} catch (error) {
+			errorMessage =
+				error instanceof Error ? error.message : 'Unable to mark category as expected.';
+		} finally {
+			markingTransactionId = null;
+		}
+	}
+
+	async function markTransferCategory(transaction: {
+		id: Id<'transactions'>;
+		categoryDetailed: string | null;
+		categoryPrimary: string | null;
+	}) {
+		markingTransactionId = transaction.id;
+		errorMessage = '';
+
+		try {
+			const category = providerCategoryFor(transaction);
+			if (!category) {
+				throw new Error('This transaction does not have a category to ignore.');
+			}
+
+			await markCategoryTransferMutation({
+				transactionId: transaction.id
+			});
+			statusMessage = `${category} will now be ignored as a transfer.`;
+		} catch (error) {
+			errorMessage =
+				error instanceof Error ? error.message : 'Unable to ignore category as transfer.';
 		} finally {
 			markingTransactionId = null;
 		}
@@ -298,8 +367,8 @@
 			<p class="eyebrow">Personal Money Tracker</p>
 			<h1>Review the money that moved outside the plan.</h1>
 			<p class="lede">
-				Mark live Plaid transactions as recurring, expected, or dynamic. Merchant rules keep repeat
-				spending out of the review pile as the tracker learns.
+				Dynamic is the default. Mark a merchant as recurring or expected once, and future matching
+				transactions can inherit that merchant-level rule.
 			</p>
 		</div>
 
@@ -352,7 +421,6 @@
 			<span>Class</span>
 			<select bind:value={classificationFilter}>
 				<option value="all">All</option>
-				<option value="unreviewed">Unreviewed</option>
 				<option value="dynamic">Dynamic</option>
 				<option value="expected">Expected</option>
 				<option value="known_recurring">Known recurring</option>
@@ -371,9 +439,9 @@
 			<p>{dynamicRows.length} transactions in {selectedMonth}</p>
 		</div>
 		<div class="organic-card">
-			<span class="metric-label">Needs review</span>
-			<strong>{unreviewedCount}</strong>
-			<p>Unreviewed rows in the selected period</p>
+			<span class="metric-label">Recurring</span>
+			<strong>{recurringCount}</strong>
+			<p>Merchant-rule rows in the selected period</p>
 		</div>
 		<div class="organic-card">
 			<span class="metric-label">Loaded rows</span>
@@ -460,8 +528,7 @@
 						<col class="category-col" />
 						<col class="class-col" />
 						<col class="amount-col" />
-						<col class="rule-col" />
-						<col class="mark-col" />
+						<col class="actions-col" />
 					</colgroup>
 					<thead>
 						<tr>
@@ -470,8 +537,7 @@
 							<th>Category</th>
 							<th>Class</th>
 							<th class="amount-column">Amount</th>
-							<th>Rule</th>
-							<th>Mark</th>
+							<th>Set merchant rule</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -486,50 +552,55 @@
 									{/if}
 								</td>
 								<td data-label="Category">
-									{transaction.userCategory ??
-										transaction.categoryDetailed ??
-										transaction.categoryPrimary ??
-										'Uncategorized'}
+									<div class="category-stack">
+										<span>{categoryFor(transaction) || 'Uncategorized'}</span>
+										{#if providerCategoryFor(transaction)}
+											<button
+												type="button"
+												class="text-action"
+												title="Treat this provider category as expected"
+												disabled={markingTransactionId === transaction.id}
+												onclick={() => markExpectedCategory(transaction)}
+											>
+												Expected category
+											</button>
+											<button
+												type="button"
+												class="text-action transfer-action"
+												title="Ignore this provider category as a transfer"
+												disabled={markingTransactionId === transaction.id}
+												onclick={() => markTransferCategory(transaction)}
+											>
+												Ignore transfer
+											</button>
+										{/if}
+									</div>
 								</td>
 								<td data-label="Class">
-									<span class={`class-chip ${transaction.classification}`}>
-										{classificationLabel(transaction.classification)}
+									<span class={`class-chip ${effectiveClassification(transaction)}`}>
+										{classificationLabel(effectiveClassification(transaction))}
 									</span>
 									<span class="source-line">{transaction.classificationSource}</span>
 								</td>
 								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
 								>
-								<td data-label="Rule">
-									<label class="rule-toggle">
-										<input type="checkbox" bind:checked={createRuleByTransaction[transaction.id]} />
-										<span>Merchant</span>
-									</label>
-								</td>
-								<td data-label="Mark">
+								<td data-label="Set merchant rule">
 									<div class="mark-actions">
 										<button
 											type="button"
-											title="Mark as known recurring"
+											title="Treat this merchant as recurring"
 											disabled={markingTransactionId === transaction.id}
 											onclick={() => markTransaction(transaction, 'known_recurring')}
 										>
-											Recur
+											Recurring merchant
 										</button>
 										<button
 											type="button"
-											title="Mark as expected"
+											title="Treat this merchant as expected"
 											disabled={markingTransactionId === transaction.id}
 											onclick={() => markTransaction(transaction, 'expected')}
 										>
-											Expect
-										</button>
-										<button
-											type="button"
-											title="Mark as dynamic"
-											disabled={markingTransactionId === transaction.id}
-											onclick={() => markTransaction(transaction, 'dynamic')}
-										>
-											Dynamic
+											Expected merchant
 										</button>
 									</div>
 								</td>
@@ -863,12 +934,8 @@
 		width: 8%;
 	}
 
-	.rule-col {
-		width: 8%;
-	}
-
-	.mark-col {
-		width: 22%;
+	.actions-col {
+		width: 30%;
 	}
 
 	th,
@@ -903,24 +970,48 @@
 		font-weight: 900;
 	}
 
-	.rule-toggle {
-		display: inline-flex;
-		grid-template-columns: none;
-		align-items: center;
-		gap: 0.45rem;
-		max-width: 100%;
+	.category-stack {
+		display: grid;
+		gap: 0.35rem;
+		align-items: start;
 	}
 
-	.rule-toggle input {
-		width: 1.05rem;
-		min-height: 1.05rem;
+	.text-action {
+		width: fit-content;
+		min-width: 0;
 		padding: 0;
-		accent-color: var(--color-primary);
+		color: var(--color-primary);
+		background: transparent;
+		border: 0;
+		border-radius: 0;
+		font-size: 0.76rem;
+		font-weight: 900;
+		line-height: 1.2;
+		text-align: left;
+		text-decoration: underline;
+		text-decoration-color: rgb(91 115 77 / 35%);
+		text-underline-offset: 0.18em;
+		cursor: pointer;
+	}
+
+	.text-action:hover {
+		color: var(--color-accent-foreground);
+		text-decoration-color: currentColor;
+	}
+
+	.transfer-action {
+		color: var(--color-muted-foreground);
+		text-decoration-color: rgb(82 76 68 / 30%);
+	}
+
+	.text-action:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
 	}
 
 	.mark-actions {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 0.35rem;
 	}
 
@@ -932,9 +1023,9 @@
 		background: rgb(230 220 205 / 50%);
 		border: 1px solid rgb(222 216 207 / 80%);
 		border-radius: var(--radius-pill);
-		font-size: 0.72rem;
+		font-size: 0.68rem;
 		font-weight: 900;
-		line-height: 1;
+		line-height: 1.05;
 		cursor: pointer;
 		transition:
 			transform 220ms ease,
@@ -1022,7 +1113,7 @@
 		}
 
 		.mark-actions {
-			grid-template-columns: repeat(3, minmax(0, 1fr));
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 	}
 </style>

@@ -102,7 +102,9 @@ export default defineSchema({
 		.index('by_date', ['date'])
 		.index('by_classification_and_date', ['classification', 'date'])
 		.index('by_accountId_and_date', ['accountId', 'date'])
-		.index('by_normalizedMerchant', ['normalizedMerchant']),
+		.index('by_normalizedMerchant', ['normalizedMerchant'])
+		.index('by_categoryDetailed', ['categoryDetailed'])
+		.index('by_categoryPrimary', ['categoryPrimary']),
 
 	transactionSources: defineTable({
 		source: transactionSource,
@@ -136,6 +138,7 @@ export default defineSchema({
 	categoryRules: defineTable({
 		providerCategory: v.string(),
 		classification: v.union(v.literal('expected'), v.literal('dynamic')),
+		kind: v.optional(transactionKind),
 		category: v.string(),
 		active: v.boolean(),
 		createdAt: v.number(),

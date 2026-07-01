@@ -17,9 +17,9 @@ const transactionClassification = v.union(
 );
 const manualTransactionClassification = v.union(
 	v.literal('known_recurring'),
-	v.literal('expected'),
-	v.literal('dynamic')
+	v.literal('expected')
 );
+const transactionKind = v.union(v.literal('expense'), v.literal('income'), v.literal('transfer'));
 const transactionFiltersValidator = {
 	limit: v.optional(v.number()),
 	classification: v.optional(transactionClassification),
@@ -37,7 +37,7 @@ const plaidTransactionValidator = v.object({
 	merchantName: v.optional(v.string()),
 	normalizedMerchant: v.string(),
 	amount: v.number(),
-	kind: v.union(v.literal('expense'), v.literal('income'), v.literal('transfer')),
+	kind: transactionKind,
 	isoCurrencyCode: v.optional(v.string()),
 	pending: v.boolean(),
 	categoryPrimary: v.optional(v.string()),
@@ -201,48 +201,205 @@ export const markTransaction = mutation({
 		}
 
 		const userCategory = normalizeOptionalText(args.category);
-		const notes = normalizeOptionalText(args.notes);
-
-		await ctx.db.patch(args.transactionId, {
+		const pattern = transaction.merchantName ?? transaction.name;
+		const normalizedPattern = transaction.normalizedMerchant;
+		const existingRule = (
+			await ctx.db
+				.query('merchantRules')
+				.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', normalizedPattern))
+				.take(1)
+		)[0];
+		const ruleDoc = {
+			matchType: args.ruleMatchType ?? ('exact' as const),
+			pattern,
+			normalizedPattern,
 			classification: args.classification,
-			classificationSource: 'manual',
-			classificationConfidence: 1,
-			userCategory,
-			notes,
-			reviewedAt: now,
+			category: userCategory,
+			active: true,
 			updatedAt: now
-		});
+		};
 
-		if (args.createMerchantRule) {
-			const pattern = transaction.merchantName ?? transaction.name;
-			const normalizedPattern = transaction.normalizedMerchant;
-			const existingRule = (
-				await ctx.db
-					.query('merchantRules')
-					.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', normalizedPattern))
-					.take(1)
-			)[0];
-			const ruleDoc = {
-				matchType: args.ruleMatchType ?? ('exact' as const),
-				pattern,
-				normalizedPattern,
-				classification: args.classification,
-				category: userCategory,
-				active: true,
-				updatedAt: now
-			};
-
-			if (existingRule) {
-				await ctx.db.patch(existingRule._id, ruleDoc);
-			} else {
-				await ctx.db.insert('merchantRules', {
-					...ruleDoc,
-					createdAt: now
-				});
-			}
+		if (existingRule) {
+			await ctx.db.patch(existingRule._id, ruleDoc);
+		} else {
+			await ctx.db.insert('merchantRules', {
+				...ruleDoc,
+				createdAt: now
+			});
 		}
 
-		return { ok: true };
+		const matchingTransactions = await ctx.db
+			.query('transactions')
+			.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedPattern))
+			.take(200);
+		let updated = 0;
+
+		for (const matchingTransaction of matchingTransactions) {
+			if (matchingTransaction.removed) continue;
+
+			await ctx.db.patch(matchingTransaction._id, {
+				classification: args.classification,
+				classificationSource: 'merchant_rule',
+				classificationConfidence: 1,
+				userCategory,
+				notes: normalizeOptionalText(args.notes),
+				reviewedAt: now,
+				updatedAt: now
+			});
+			updated += 1;
+		}
+
+		return { ok: true, merchant: normalizedPattern, updated };
+	}
+});
+
+export const markCategoryExpected = mutation({
+	args: {
+		transactionId: v.id('transactions')
+	},
+	handler: async (ctx, args) => {
+		const now = Date.now();
+		const transaction = await ctx.db.get(args.transactionId);
+
+		if (!transaction || transaction.removed) {
+			throw new Error('Transaction is not available for marking.');
+		}
+
+		const providerCategory = transaction.categoryDetailed ?? transaction.categoryPrimary;
+
+		if (!providerCategory) {
+			throw new Error('This transaction does not have a provider category to mark as expected.');
+		}
+
+		const category = transaction.userCategory ?? providerCategory;
+		const existingRule = (
+			await ctx.db
+				.query('categoryRules')
+				.withIndex('by_providerCategory', (q) => q.eq('providerCategory', providerCategory))
+				.take(1)
+		)[0];
+		const ruleDoc = {
+			providerCategory,
+			classification: 'expected' as const,
+			kind: 'expense' as const,
+			category,
+			active: true,
+			updatedAt: now
+		};
+
+		if (existingRule) {
+			await ctx.db.patch(existingRule._id, ruleDoc);
+		} else {
+			await ctx.db.insert('categoryRules', {
+				...ruleDoc,
+				createdAt: now
+			});
+		}
+
+		const matchingTransactions = transaction.categoryDetailed
+			? await ctx.db
+					.query('transactions')
+					.withIndex('by_categoryDetailed', (q) =>
+						q.eq('categoryDetailed', transaction.categoryDetailed)
+					)
+					.take(200)
+			: await ctx.db
+					.query('transactions')
+					.withIndex('by_categoryPrimary', (q) => q.eq('categoryPrimary', providerCategory))
+					.take(200);
+		let updated = 0;
+
+		for (const matchingTransaction of matchingTransactions) {
+			if (matchingTransaction.removed) continue;
+
+			await ctx.db.patch(matchingTransaction._id, {
+				kind: 'expense',
+				classification: 'expected',
+				classificationSource: 'category_rule',
+				classificationConfidence: 1,
+				userCategory: category,
+				reviewedAt: now,
+				updatedAt: now
+			});
+			updated += 1;
+		}
+
+		return { ok: true, category: providerCategory, updated };
+	}
+});
+
+export const markCategoryTransfer = mutation({
+	args: {
+		transactionId: v.id('transactions')
+	},
+	handler: async (ctx, args) => {
+		const now = Date.now();
+		const transaction = await ctx.db.get(args.transactionId);
+
+		if (!transaction || transaction.removed) {
+			throw new Error('Transaction is not available for marking.');
+		}
+
+		const providerCategory = transaction.categoryDetailed ?? transaction.categoryPrimary;
+
+		if (!providerCategory) {
+			throw new Error('This transaction does not have a provider category to ignore.');
+		}
+
+		const category = transaction.userCategory ?? providerCategory;
+		const existingRule = (
+			await ctx.db
+				.query('categoryRules')
+				.withIndex('by_providerCategory', (q) => q.eq('providerCategory', providerCategory))
+				.take(1)
+		)[0];
+		const ruleDoc = {
+			providerCategory,
+			classification: 'dynamic' as const,
+			kind: 'transfer' as const,
+			category,
+			active: true,
+			updatedAt: now
+		};
+
+		if (existingRule) {
+			await ctx.db.patch(existingRule._id, ruleDoc);
+		} else {
+			await ctx.db.insert('categoryRules', {
+				...ruleDoc,
+				createdAt: now
+			});
+		}
+
+		const matchingTransactions = transaction.categoryDetailed
+			? await ctx.db
+					.query('transactions')
+					.withIndex('by_categoryDetailed', (q) =>
+						q.eq('categoryDetailed', transaction.categoryDetailed)
+					)
+					.take(200)
+			: await ctx.db
+					.query('transactions')
+					.withIndex('by_categoryPrimary', (q) => q.eq('categoryPrimary', providerCategory))
+					.take(200);
+		let updated = 0;
+
+		for (const matchingTransaction of matchingTransactions) {
+			if (matchingTransaction.removed) continue;
+
+			await ctx.db.patch(matchingTransaction._id, {
+				kind: 'transfer',
+				classification: 'dynamic',
+				classificationSource: 'category_rule',
+				classificationConfidence: 1,
+				userCategory: category,
+				reviewedAt: now,
+				updatedAt: now
+			});
+			updated += 1;
+		}
+
+		return { ok: true, category: providerCategory, updated };
 	}
 });
 
@@ -270,6 +427,7 @@ export const listRules = query({
 				id: rule._id,
 				providerCategory: rule.providerCategory,
 				classification: rule.classification,
+				kind: rule.kind ?? null,
 				category: rule.category
 			}))
 		};
@@ -506,14 +664,12 @@ async function upsertTransaction(
 	let transactionDocId: Id<'transactions'>;
 
 	if (existing) {
-		const classification =
-			existing.classificationSource === 'manual'
-				? {}
-				: await classifyFromRules(
-						ctx,
-						transaction.normalizedMerchant,
-						transaction.categoryDetailed
-					);
+		const classification = await classifyFromRules(
+			ctx,
+			transaction.normalizedMerchant,
+			transaction.categoryDetailed,
+			transaction.categoryPrimary
+		);
 		await ctx.db.patch(existing._id, {
 			...baseDoc,
 			...classification
@@ -523,7 +679,8 @@ async function upsertTransaction(
 		const classification = await classifyFromRules(
 			ctx,
 			transaction.normalizedMerchant,
-			transaction.categoryDetailed
+			transaction.categoryDetailed,
+			transaction.categoryPrimary
 		);
 		transactionDocId = await ctx.db.insert('transactions', {
 			...baseDoc,
@@ -619,7 +776,8 @@ async function readTransactions(
 async function classifyFromRules(
 	ctx: MutationCtx,
 	normalizedMerchant: string,
-	categoryDetailed?: string
+	categoryDetailed?: string,
+	categoryPrimary?: string
 ) {
 	const merchantRules = await ctx.db
 		.query('merchantRules')
@@ -639,26 +797,37 @@ async function classifyFromRules(
 		};
 	}
 
-	if (categoryDetailed) {
+	const providerCategory = categoryDetailed ?? categoryPrimary;
+
+	if (providerCategory) {
 		const categoryRule = (
 			await ctx.db
 				.query('categoryRules')
-				.withIndex('by_providerCategory', (q) => q.eq('providerCategory', categoryDetailed))
+				.withIndex('by_providerCategory', (q) => q.eq('providerCategory', providerCategory))
 				.take(1)
 		)[0];
 
 		if (categoryRule?.active) {
-			return {
+			const classification = {
 				classification: categoryRule.classification,
 				classificationSource: 'category_rule' as const,
 				classificationConfidence: 0.9,
 				userCategory: categoryRule.category
 			};
+
+			if (categoryRule.kind) {
+				return {
+					...classification,
+					kind: categoryRule.kind
+				};
+			}
+
+			return classification;
 		}
 	}
 
 	return {
-		classification: 'unreviewed' as const,
+		classification: 'dynamic' as const,
 		classificationSource: 'default' as const,
 		classificationConfidence: undefined,
 		userCategory: undefined
