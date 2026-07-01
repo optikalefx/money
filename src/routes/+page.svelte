@@ -454,6 +454,15 @@
 				<div class="empty-state">Unable to load transactions.</div>
 			{:else if visibleTransactions.length}
 				<table>
+					<colgroup>
+						<col class="date-col" />
+						<col class="merchant-col" />
+						<col class="category-col" />
+						<col class="class-col" />
+						<col class="amount-col" />
+						<col class="rule-col" />
+						<col class="mark-col" />
+					</colgroup>
 					<thead>
 						<tr>
 							<th>Date</th>
@@ -468,34 +477,35 @@
 					<tbody>
 						{#each visibleTransactions as transaction (transaction.id)}
 							<tr>
-								<td>{transaction.date}</td>
-								<td>
+								<td data-label="Date">{transaction.date}</td>
+								<td data-label="Merchant">
 									<strong>{transaction.merchantName ?? transaction.name}</strong>
 									<span class="source-line">{transaction.source}</span>
 									{#if transaction.pending}
 										<span class="pending-chip">Pending</span>
 									{/if}
 								</td>
-								<td>
+								<td data-label="Category">
 									{transaction.userCategory ??
 										transaction.categoryDetailed ??
 										transaction.categoryPrimary ??
 										'Uncategorized'}
 								</td>
-								<td>
+								<td data-label="Class">
 									<span class={`class-chip ${transaction.classification}`}>
 										{classificationLabel(transaction.classification)}
 									</span>
 									<span class="source-line">{transaction.classificationSource}</span>
 								</td>
-								<td class="amount-column">{formatAmount(transaction.amount)}</td>
-								<td>
+								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
+								>
+								<td data-label="Rule">
 									<label class="rule-toggle">
 										<input type="checkbox" bind:checked={createRuleByTransaction[transaction.id]} />
 										<span>Merchant</span>
 									</label>
 								</td>
-								<td>
+								<td data-label="Mark">
 									<div class="mark-actions">
 										<button
 											type="button"
@@ -503,7 +513,7 @@
 											disabled={markingTransactionId === transaction.id}
 											onclick={() => markTransaction(transaction, 'known_recurring')}
 										>
-											Recurring
+											Recur
 										</button>
 										<button
 											type="button"
@@ -511,7 +521,7 @@
 											disabled={markingTransactionId === transaction.id}
 											onclick={() => markTransaction(transaction, 'expected')}
 										>
-											Expected
+											Expect
 										</button>
 										<button
 											type="button"
@@ -823,22 +833,52 @@
 	}
 
 	.table-shell {
-		overflow-x: auto;
+		overflow: hidden;
 		border-radius: 1.8rem;
 	}
 
 	table {
 		width: 100%;
-		min-width: 74rem;
 		border-collapse: collapse;
+		table-layout: fixed;
+	}
+
+	.date-col {
+		width: 6%;
+	}
+
+	.merchant-col {
+		width: 15%;
+	}
+
+	.category-col {
+		width: 30%;
+	}
+
+	.class-col {
+		width: 11%;
+	}
+
+	.amount-col {
+		width: 8%;
+	}
+
+	.rule-col {
+		width: 8%;
+	}
+
+	.mark-col {
+		width: 22%;
 	}
 
 	th,
 	td {
-		padding: 1rem;
+		padding: 0.95rem 0.8rem;
 		border-bottom: 1px solid rgb(222 216 207 / 58%);
 		text-align: left;
 		vertical-align: middle;
+		overflow-wrap: anywhere;
+		word-break: normal;
 	}
 
 	th {
@@ -849,8 +889,9 @@
 	}
 
 	td strong {
-		display: inline;
+		display: block;
 		font-weight: 900;
+		overflow-wrap: anywhere;
 	}
 
 	tr:last-child td {
@@ -867,7 +908,7 @@
 		grid-template-columns: none;
 		align-items: center;
 		gap: 0.45rem;
-		white-space: nowrap;
+		max-width: 100%;
 	}
 
 	.rule-toggle input {
@@ -878,20 +919,22 @@
 	}
 
 	.mark-actions {
-		display: flex;
-		flex-wrap: wrap;
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: 0.35rem;
 	}
 
 	.mark-actions button {
 		min-height: 2.1rem;
-		padding: 0.45rem 0.65rem;
+		min-width: 0;
+		padding: 0.45rem 0.4rem;
 		color: var(--color-accent-foreground);
 		background: rgb(230 220 205 / 50%);
 		border: 1px solid rgb(222 216 207 / 80%);
 		border-radius: var(--radius-pill);
-		font-size: 0.78rem;
+		font-size: 0.72rem;
 		font-weight: 900;
+		line-height: 1;
 		cursor: pointer;
 		transition:
 			transform 220ms ease,
@@ -927,6 +970,59 @@
 
 		.bar-row {
 			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (max-width: 760px) {
+		.table-shell {
+			background: transparent;
+			border: 0;
+			box-shadow: none;
+		}
+
+		table,
+		thead,
+		tbody,
+		tr,
+		th,
+		td {
+			display: block;
+			width: 100%;
+		}
+
+		colgroup,
+		thead {
+			display: none;
+		}
+
+		tr {
+			margin-bottom: 0.9rem;
+			padding: 1rem;
+			background: rgb(254 254 250 / 90%);
+			border: 1px solid rgb(222 216 207 / 65%);
+			border-radius: 1.4rem 2.2rem 1.5rem 1.9rem;
+			box-shadow: var(--shadow-soft);
+		}
+
+		td {
+			display: grid;
+			grid-template-columns: 6.5rem minmax(0, 1fr);
+			gap: 0.75rem;
+			padding: 0.45rem 0;
+			border-bottom: 0;
+		}
+
+		td::before {
+			color: var(--color-muted-foreground);
+			font-size: 0.72rem;
+			font-weight: 900;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+			content: attr(data-label);
+		}
+
+		.mark-actions {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 	}
 </style>
