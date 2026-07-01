@@ -147,11 +147,41 @@ export default defineSchema({
 		.index('by_active', ['active'])
 		.index('by_providerCategory', ['providerCategory']),
 
+	gmailAccounts: defineTable({
+		email: v.optional(v.string()),
+		refreshToken: v.string(),
+		accessToken: v.optional(v.string()),
+		accessTokenExpiresAt: v.optional(v.number()),
+		scope: v.optional(v.string()),
+		status: connectionStatus,
+		lastSyncAt: v.optional(v.number()),
+		// Highest Gmail internalDate (epoch ms) processed, used to only fetch newer messages.
+		lastMessageEpochMs: v.optional(v.number()),
+		connectedAt: v.number(),
+		updatedAt: v.number(),
+		errorCode: v.optional(v.string()),
+		errorMessage: v.optional(v.string())
+	}).index('by_status', ['status']),
+
+	oauthStates: defineTable({
+		provider: v.literal('gmail'),
+		state: v.string(),
+		returnTo: v.optional(v.string()),
+		createdAt: v.number()
+	}).index('by_state', ['state']),
+
 	amazonOrders: defineTable({
 		gmailMessageId: v.string(),
 		orderId: v.optional(v.string()),
 		orderDate: v.optional(v.string()),
+		subtotal: v.optional(v.number()),
+		tax: v.optional(v.number()),
+		shipping: v.optional(v.number()),
 		total: v.optional(v.number()),
+		isoCurrencyCode: v.optional(v.string()),
+		reviewState: v.optional(
+			v.union(v.literal('unmatched'), v.literal('matched'), v.literal('review'))
+		),
 		matchedTransactionId: v.optional(v.id('transactions')),
 		matchConfidence: v.optional(v.number()),
 		raw: v.any(),
@@ -160,10 +190,12 @@ export default defineSchema({
 	})
 		.index('by_gmailMessageId', ['gmailMessageId'])
 		.index('by_orderId', ['orderId'])
+		.index('by_reviewState', ['reviewState'])
 		.index('by_matchedTransactionId', ['matchedTransactionId']),
 
 	amazonOrderItems: defineTable({
 		amazonOrderId: v.id('amazonOrders'),
+		asin: v.optional(v.string()),
 		title: v.string(),
 		quantity: v.optional(v.number()),
 		amount: v.optional(v.number()),
@@ -173,7 +205,25 @@ export default defineSchema({
 		updatedAt: v.number()
 	})
 		.index('by_amazonOrderId', ['amazonOrderId'])
+		.index('by_asin', ['asin'])
 		.index('by_classification', ['classification']),
+
+	// User rules keyed on Amazon ASIN so repeat purchases (e.g. Subscribe & Save) auto-classify.
+	amazonItemRules: defineTable({
+		asin: v.string(),
+		title: v.optional(v.string()),
+		classification: v.union(
+			v.literal('known_recurring'),
+			v.literal('expected'),
+			v.literal('dynamic')
+		),
+		category: v.optional(v.string()),
+		active: v.boolean(),
+		createdAt: v.number(),
+		updatedAt: v.number()
+	})
+		.index('by_active', ['active'])
+		.index('by_asin', ['asin']),
 
 	aiClassifications: defineTable({
 		transactionId: v.id('transactions'),

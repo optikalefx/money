@@ -25,6 +25,11 @@ import type { DataModel } from "./dataModel.js";
  * Typesafe environment variables declared in `convex.config.ts`.
  */
 type Env = {
+  readonly GMAIL_AMAZON_QUERY: string | undefined;
+  readonly GMAIL_POST_AUTH_URL: string | undefined;
+  readonly GOOGLE_CLIENT_ID: string | undefined;
+  readonly GOOGLE_CLIENT_SECRET: string | undefined;
+  readonly GOOGLE_REDIRECT_URI: string | undefined;
   readonly OPENAI_API_KEY: string | undefined;
   readonly PLAID_CLIENT_ID: string;
   readonly PLAID_ENV: string;

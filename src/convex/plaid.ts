@@ -103,25 +103,87 @@ export const listRecentTransactions = query({
 			endDate: args.endDate,
 			search: args.search
 		});
-		return rows.map((transaction) => ({
-			id: transaction._id,
-			date: transaction.date,
-			name: transaction.name,
-			merchantName: transaction.merchantName ?? null,
-			normalizedMerchant: transaction.normalizedMerchant,
-			amount: transaction.amount,
-			kind: transaction.kind,
-			pending: transaction.pending,
-			categoryPrimary: transaction.categoryPrimary ?? null,
-			categoryDetailed: transaction.categoryDetailed ?? null,
-			userCategory: transaction.userCategory ?? null,
-			classification: transaction.classification,
-			classificationSource: transaction.classificationSource,
-			source: transaction.source,
-			removed: transaction.removed
-		}));
+		return Promise.all(
+			rows.map(async (transaction) => ({
+				id: transaction._id,
+				date: transaction.date,
+				name: transaction.name,
+				merchantName: transaction.merchantName ?? null,
+				normalizedMerchant: transaction.normalizedMerchant,
+				amount: transaction.amount,
+				kind: transaction.kind,
+				pending: transaction.pending,
+				categoryPrimary: transaction.categoryPrimary ?? null,
+				categoryDetailed: transaction.categoryDetailed ?? null,
+				userCategory: transaction.userCategory ?? null,
+				classification: transaction.classification,
+				classificationSource: transaction.classificationSource,
+				source: transaction.source,
+				removed: transaction.removed,
+				amazonItems: await amazonItemsForTransaction(ctx, transaction)
+			}))
+		);
 	}
 });
+
+// The primary (first) purchased item with an ASIN for an Amazon transaction, used to group
+// recurring Amazon spend by item instead of by the shared "amazon" merchant.
+async function primaryAsinForTransaction(
+	ctx: QueryCtx,
+	transactionId: Id<'transactions'>
+): Promise<{ asin: string; title: string } | null> {
+	const order = (
+		await ctx.db
+			.query('amazonOrders')
+			.withIndex('by_matchedTransactionId', (q) => q.eq('matchedTransactionId', transactionId))
+			.take(1)
+	)[0];
+	if (!order) return null;
+
+	const items = await ctx.db
+		.query('amazonOrderItems')
+		.withIndex('by_amazonOrderId', (q) => q.eq('amazonOrderId', order._id))
+		.take(20);
+	const item = items.find((candidate) => candidate.asin);
+	return item?.asin ? { asin: item.asin, title: item.title } : null;
+}
+
+// For Amazon transactions, surface the actual purchased items (from a matched Gmail order)
+// so the review queue shows the item bought instead of a generic "Amazon" line.
+async function amazonItemsForTransaction(
+	ctx: QueryCtx,
+	transaction: { _id: Id<'transactions'>; normalizedMerchant: string }
+) {
+	if (!transaction.normalizedMerchant.includes('amazon')) return [];
+
+	const orders = await ctx.db
+		.query('amazonOrders')
+		.withIndex('by_matchedTransactionId', (q) => q.eq('matchedTransactionId', transaction._id))
+		.take(4);
+	const items: Array<{
+		title: string;
+		quantity: number | null;
+		amount: number | null;
+		asin: string | null;
+	}> = [];
+
+	for (const order of orders) {
+		const orderItems = await ctx.db
+			.query('amazonOrderItems')
+			.withIndex('by_amazonOrderId', (q) => q.eq('amazonOrderId', order._id))
+			.take(20);
+		for (const item of orderItems) {
+			items.push({
+				title: item.title,
+				quantity: item.quantity ?? null,
+				amount: item.amount ?? null,
+				asin: item.asin ?? null
+			});
+		}
+	}
+
+	return items;
+}
 
 export const getDynamicDashboard = query({
 	args: {
@@ -203,9 +265,13 @@ export const getRecurringSummary = query({
 				'Uncategorized'
 		);
 
+		// Amazon recurring is grouped per item (ASIN) rather than lumped under one "amazon" row,
+		// so each Subscribe & Save item is its own recurring entry that can be unmarked on its own.
 		const merchantTotals = new Map<
 			string,
 			{
+				key: string;
+				asin: string | null;
 				normalizedMerchant: string;
 				label: string;
 				total: number;
@@ -214,10 +280,24 @@ export const getRecurringSummary = query({
 			}
 		>();
 		for (const transaction of expenses) {
-			const key = transaction.normalizedMerchant;
+			let key = `merchant:${transaction.normalizedMerchant}`;
+			let asin: string | null = null;
+			let label = transaction.merchantName ?? transaction.name;
+
+			if (transaction.normalizedMerchant.includes('amazon')) {
+				const primary = await primaryAsinForTransaction(ctx, transaction._id);
+				if (primary) {
+					key = `asin:${primary.asin}`;
+					asin = primary.asin;
+					label = primary.title;
+				}
+			}
+
 			const existing = merchantTotals.get(key) ?? {
-				normalizedMerchant: key,
-				label: transaction.merchantName ?? transaction.name,
+				key,
+				asin,
+				normalizedMerchant: transaction.normalizedMerchant,
+				label,
 				total: 0,
 				count: 0,
 				months: new Set<string>()
@@ -230,6 +310,8 @@ export const getRecurringSummary = query({
 		const byMerchant = [...merchantTotals.values()]
 			.sort((a, b) => b.total - a.total)
 			.map((merchant) => ({
+				key: merchant.key,
+				asin: merchant.asin,
 				normalizedMerchant: merchant.normalizedMerchant,
 				label: merchant.label,
 				total: merchant.total,
@@ -270,22 +352,25 @@ export const getRecurringTransactions = query({
 			.order('desc')
 			.take(500);
 
-		return rows
-			.filter((transaction) => !transaction.removed)
-			.map((transaction) => ({
-				id: transaction._id,
-				date: transaction.date,
-				name: transaction.name,
-				merchantName: transaction.merchantName ?? null,
-				amount: transaction.amount,
-				kind: transaction.kind,
-				pending: transaction.pending,
-				categoryPrimary: transaction.categoryPrimary ?? null,
-				categoryDetailed: transaction.categoryDetailed ?? null,
-				userCategory: transaction.userCategory ?? null,
-				classificationSource: transaction.classificationSource,
-				source: transaction.source
-			}));
+		return Promise.all(
+			rows
+				.filter((transaction) => !transaction.removed)
+				.map(async (transaction) => ({
+					id: transaction._id,
+					date: transaction.date,
+					name: transaction.name,
+					merchantName: transaction.merchantName ?? null,
+					amount: transaction.amount,
+					kind: transaction.kind,
+					pending: transaction.pending,
+					categoryPrimary: transaction.categoryPrimary ?? null,
+					categoryDetailed: transaction.categoryDetailed ?? null,
+					userCategory: transaction.userCategory ?? null,
+					classificationSource: transaction.classificationSource,
+					source: transaction.source,
+					amazonItems: await amazonItemsForTransaction(ctx, transaction)
+				}))
+		);
 	}
 });
 
@@ -813,16 +898,10 @@ async function upsertTransaction(
 	let transactionDocId: Id<'transactions'>;
 
 	if (existing) {
-		const classification = await classifyFromRules(
-			ctx,
-			transaction.normalizedMerchant,
-			transaction.categoryDetailed,
-			transaction.categoryPrimary
-		);
-		await ctx.db.patch(existing._id, {
-			...baseDoc,
-			...classification
-		});
+		// Preserve the existing classification and kind on re-sync so a Plaid "modified" record
+		// can't wipe a manual mark, a category-rule transfer, or an Amazon ASIN-rule result.
+		const { kind: _kind, ...preservedDoc } = baseDoc;
+		await ctx.db.patch(existing._id, preservedDoc);
 		transactionDocId = existing._id;
 	} else {
 		const classification = await classifyFromRules(

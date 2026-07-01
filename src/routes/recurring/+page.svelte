@@ -16,8 +16,11 @@
 		userCategory: string | null;
 		classificationSource: string;
 		source: string;
+		amazonItems?: Array<{ title: string; quantity: number | null; amount: number | null }>;
 	};
 	type MerchantRow = {
+		key: string;
+		asin: string | null;
 		normalizedMerchant: string;
 		label: string;
 		total: number;
@@ -30,7 +33,7 @@
 
 	let selectedMonth = $state(initialMonth);
 	let allTime = $state(false);
-	let unmarkingMerchant = $state<string | null>(null);
+	let unmarkingKey = $state<string | null>(null);
 	let statusMessage = $state('');
 	let errorMessage = $state('');
 
@@ -45,6 +48,7 @@
 		keepPreviousData: true
 	});
 	const unmarkRecurringMutation = useMutation(api.plaid.unmarkRecurring);
+	const unmarkAmazonItemMutation = useMutation(api.gmail.unmarkAmazonItem);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',
@@ -75,20 +79,21 @@
 	}
 
 	async function unmark(merchant: MerchantRow) {
-		unmarkingMerchant = merchant.normalizedMerchant;
+		unmarkingKey = merchant.key;
 		errorMessage = '';
 
 		try {
-			const result = await unmarkRecurringMutation({
-				normalizedMerchant: merchant.normalizedMerchant
-			});
+			// Amazon rows are keyed on the item ASIN; everything else on the merchant.
+			const result = merchant.asin
+				? await unmarkAmazonItemMutation({ asin: merchant.asin })
+				: await unmarkRecurringMutation({ normalizedMerchant: merchant.normalizedMerchant });
 			statusMessage = `${merchant.label} is no longer recurring (${result.updated} transaction${
 				result.updated === 1 ? '' : 's'
 			} moved back to dynamic).`;
 		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : 'Unable to unmark merchant.';
+			errorMessage = error instanceof Error ? error.message : 'Unable to unmark.';
 		} finally {
-			unmarkingMerchant = null;
+			unmarkingKey = null;
 		}
 	}
 </script>
@@ -174,7 +179,7 @@
 					<span class="amount-column">Monthly</span>
 					<span></span>
 				</div>
-				{#each byMerchant as row (row.normalizedMerchant)}
+				{#each byMerchant as row (row.key)}
 					<div class="merchant-row">
 						<div class="merchant-info">
 							<strong>{row.label}</strong>
@@ -185,11 +190,11 @@
 						<button
 							type="button"
 							class="unmark-button"
-							title="Move this merchant and its transactions back to dynamic"
-							disabled={unmarkingMerchant === row.normalizedMerchant}
+							title="Move this and its transactions back to dynamic"
+							disabled={unmarkingKey === row.key}
 							onclick={() => unmark(row)}
 						>
-							{unmarkingMerchant === row.normalizedMerchant ? 'Unmarking...' : 'Unmark'}
+							{unmarkingKey === row.key ? 'Unmarking...' : 'Unmark'}
 						</button>
 					</div>
 				{:else}
@@ -243,8 +248,17 @@
 							<tr>
 								<td data-label="Date">{transaction.date}</td>
 								<td data-label="Merchant">
-									<strong>{transaction.merchantName ?? transaction.name}</strong>
-									<span class="source-line">{transaction.source}</span>
+									{#if transaction.amazonItems && transaction.amazonItems.length}
+										{#each transaction.amazonItems as item, i (i)}
+											<strong>{item.title}</strong>
+										{/each}
+										<span class="source-line"
+											>Amazon · {transaction.merchantName ?? transaction.name}</span
+										>
+									{:else}
+										<strong>{transaction.merchantName ?? transaction.name}</strong>
+										<span class="source-line">{transaction.source}</span>
+									{/if}
 									{#if transaction.pending}
 										<span class="pending-chip">Pending</span>
 									{/if}

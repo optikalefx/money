@@ -22,7 +22,7 @@ Build a personal money tracking app that separates expected spending from unplan
 - [x] Define environment variables in Convex config for Plaid, Gmail, Google OAuth, OpenAI or chosen AI provider, and sync controls.
 - [ ] Decide whether Plaid and Gmail OAuth setup flows live in SvelteKit routes, Convex HTTP actions, or a split between both.
 - [ ] Add a minimal settings area for connection status, reconnect actions, and manual sync triggers.
-- [ ] Document local setup steps in `README.md` once integrations are implemented.
+- [~] Document local setup steps in `README.md` once integrations are implemented. (Gmail/GCP + Plaid setup documented; Plaid setup steps are brief.)
 
 ## Phase 2: Data Model
 
@@ -70,18 +70,27 @@ Build a personal money tracking app that separates expected spending from unplan
 
 ## Phase 5: Gmail And Amazon Import
 
-- [ ] Create Google Cloud OAuth app and Gmail API scope plan using least privilege.
-- [ ] Implement Gmail OAuth connect flow.
-- [ ] Store Gmail connection metadata and refresh token securely.
-- [ ] Add Gmail connection status and reconnect UI.
-- [ ] Define Gmail search query for the specific Amazon email address and relevant order/shipping/receipt subjects.
-- [ ] Implement manual Gmail sync for Amazon messages.
+- [ ] Create Google Cloud OAuth app and Gmail API scope plan using least privilege. (User action: Google Cloud Console — see setup steps below.)
+- [x] Implement Gmail OAuth connect flow. (`getGmailAuthUrl` action + `/gmail/callback` HTTP action.)
+- [x] Store Gmail connection metadata and refresh token securely. (`gmailAccounts` table, Convex server-side only.)
+- [x] Add Gmail connection status and reconnect UI. (Home-page Gmail panel with connect/reconnect/sync.)
+- [x] Define Gmail search query for the specific Amazon email address and relevant order/shipping/receipt subjects. (`DEFAULT_AMAZON_QUERY`, overridable via `GMAIL_AMAZON_QUERY`.)
+- [x] Implement manual Gmail sync for Amazon messages. (`syncGmail` action.)
 - [ ] Implement scheduled daily Gmail sync.
-- [ ] Store raw email metadata and parsed source payloads for auditability.
-- [ ] Parse Amazon order ID, order date, merchant, subtotal, tax, shipping, total, payment method hints, and item names when present.
-- [ ] Store Amazon order items separately from transactions.
-- [ ] Link Amazon order records to matching Plaid transactions using date, amount, card/account hints, and merchant patterns.
-- [ ] Add a review state for unmatched Amazon orders or uncertain matches.
+- [x] Store raw email metadata and parsed source payloads for auditability. (Snippet + headers stored on `amazonOrders.raw`.)
+- [x] Parse Amazon order ID, order date, merchant, subtotal, tax, shipping, total, payment method hints, and item names when present. (Parser handles multi-order emails and the `Grand Total:`/`Total`/`Order Total:` variants; extracts order ID, date, net total, and item title/qty/price from the text/plain part — 99% total coverage on live data. Subtotal/tax/shipping aren't itemized in these emails, so they're left unset.)
+- [x] Store Amazon order items separately from transactions. (`amazonOrderItems` table + idempotent replace on re-sync; populated by the parser.)
+- [x] Link Amazon order records to matching Plaid transactions using date, amount, card/account hints, and merchant patterns. (Amount + date-window match against `amazon` merchants.)
+- [x] Add a review state for unmatched Amazon orders or uncertain matches. (`amazonOrders.reviewState`: unmatched/matched/review.)
+
+### Google Cloud OAuth setup (user action required)
+
+- Create a Google Cloud project and enable the Gmail API.
+- Configure the OAuth consent screen: External, Testing mode, add your own email as a test user.
+- Create an OAuth **Web application** client.
+- Least-privilege scope: `https://www.googleapis.com/auth/gmail.readonly`.
+- Authorized redirect URI: `${PUBLIC_CONVEX_SITE_URL}/gmail/callback`.
+- Set Convex env vars: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` (the callback URL above). Optionally `GMAIL_POST_AUTH_URL` (app URL to return to after consent) and `GMAIL_AMAZON_QUERY` (search override).
 
 ## Phase 6: Classification And Rules
 
@@ -184,23 +193,27 @@ Build a personal money tracking app that separates expected spending from unplan
 - [x] Plaid Link creates a token and connects successfully from the local Svelte app.
 - [x] Plaid manual sync imports live Chase transaction data into Convex.
 - [x] Recent transaction display is available for inspecting imported transaction shape.
-- [ ] Transaction marking UI is not implemented yet.
-- [ ] Reconnect/update mode is not implemented yet.
-- [ ] Scheduled Plaid sync is not implemented yet.
-- [ ] Gmail/Amazon import is not implemented yet.
+- [x] Transaction marking UI is implemented (recurring/expected merchant rules, expected/transfer category rules, unmark).
+- [x] Merchant and category rules auto-classify on sync (`classifyFromRules`).
+- [x] First Dynamic expenses dashboard is live (dynamic total, by-category, top-merchants, review queue) plus a recurring page.
+- [x] Gmail OAuth connect + manual Amazon sync + order/transaction matching implemented (parser item extraction still pending).
+- [ ] Reconnect/update mode for Plaid is not implemented yet.
+- [ ] Scheduled Plaid and Gmail sync are not implemented yet.
+- [x] Amazon email item-name parsing tuned against real emails (order ID, net total, item title/qty/price; 99% total coverage, live matching to Plaid working).
 
 ## Next Phase
 
-- [ ] Inspect the synced Plaid transaction shape and adjust schema/normalization if needed.
-- [ ] Build transaction marking actions and UI for `known_recurring`, `expected`, and `dynamic`.
-- [ ] Add merchant/category rules so expected food, grocery, and recurring merchants do not need repeated manual marking.
-- [ ] Add the first Dynamic expenses dashboard using the live Plaid data.
-- [ ] After the Plaid-only workflow is usable, start Gmail OAuth and Amazon order item import.
+- [ ] Complete Google Cloud OAuth setup and set Convex env vars (see Phase 5 setup steps), then connect Gmail and run a live Amazon sync.
+- [x] Tune the Amazon email parser against real order emails to extract individual item names/prices into `amazonOrderItems`.
+- [ ] Break Amazon order items out into the dynamic dashboard math per the confirmed decision.
+- [x] Add unmark support for Amazon ASIN rules. (`/recurring` groups Amazon recurring spend per item/ASIN as its own row; Unmark calls `unmarkAmazonItem` to delete the rule and reset transactions — visually identical to unmarking a merchant.)
+- [ ] Add app-level duplicate detection so a matched Amazon order does not double-count against its Plaid transaction.
+- [ ] Add scheduled daily Plaid + Gmail sync (Convex cron), then Plaid reconnect/update mode.
 
 ## Open Decisions
 
 - [x] Choose auth provider, or confirm this remains a single-user app with a simpler access model.
-- [ ] Choose where OAuth callback routes should live.
+- [x] Choose where OAuth callback routes should live. Gmail OAuth callback lives in a Convex HTTP action (`http.ts` → `/gmail/callback`), keeping refresh tokens server-side like the Plaid access token.
 - [ ] Choose token storage approach and whether an additional encryption layer is required beyond provider/platform secret storage.
 - [x] Choose AI provider/model and daily classification cost limit.
 - [ ] Define exact food/grocery/expected categories for the initial budget map.
@@ -226,4 +239,7 @@ Build a personal money tracking app that separates expected spending from unplan
 - AI categorization will use OpenAI.
 - Food, grocery, gas, and similar expected categories should be excluded from the Dynamic dashboard while remaining available for summaries and math.
 - Amazon spending should be broken out into individual order items because the Chase transaction line is not useful enough by itself.
+- The Amazon orders view does not live on the homepage; instead, matched Amazon items enrich the Plaid transaction in the review queue (the "Amazon" line shows the actual item bought) so it flows through the normal categorize/mark workflow.
+- Amazon item classification rules are keyed on the product **ASIN** (parsed from the confirmation email's `/dp/<ASIN>` title link), not the item title, so repeat purchases (Subscribe & Save) auto-classify and title edits don't break the rule. ASINs are not present as plain fields — they're extracted from the URL-encoded `/gp/r.html` redirect links.
+- On Plaid re-sync of an existing transaction, the classification and kind are preserved (a "modified" record must not wipe a manual mark, a category-rule transfer, or an ASIN-rule result).
 - Build should start against real data so the schema and UI can adapt to actual Plaid and Gmail shapes.

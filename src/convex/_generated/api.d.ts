@@ -8,6 +8,9 @@
  * @module
  */
 
+import type * as gmail from "../gmail.js";
+import type * as gmailActions from "../gmailActions.js";
+import type * as http from "../http.js";
 import type * as plaid from "../plaid.js";
 import type * as plaidActions from "../plaidActions.js";
 
@@ -18,6 +21,9 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  gmail: typeof gmail;
+  gmailActions: typeof gmailActions;
+  http: typeof http;
   plaid: typeof plaid;
   plaidActions: typeof plaidActions;
 }>;

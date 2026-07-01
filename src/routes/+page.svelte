@@ -20,6 +20,7 @@
 		classificationSource: string;
 		source: string;
 		removed?: boolean;
+		amazonItems?: Array<{ title: string; quantity: number | null; amount: number | null }>;
 	};
 
 	const today = new Date();
@@ -29,6 +30,8 @@
 	let searchTerm = $state('');
 	let isConnecting = $state(false);
 	let isSyncing = $state(false);
+	let isConnectingGmail = $state(false);
+	let isSyncingGmail = $state(false);
 	let markingTransactionId = $state<string | null>(null);
 	let statusMessage = $state('');
 	let errorMessage = $state('');
@@ -41,10 +44,14 @@
 	const transactions = useQuery(api.plaid.listRecentTransactions, () => transactionArgs, {
 		keepPreviousData: true
 	});
+	const gmailStatus = useQuery(api.gmail.getConnectionStatus, () => ({}));
 	const createLinkToken = useAction(api.plaidActions.createLinkToken);
 	const exchangePublicToken = useAction(api.plaidActions.exchangePublicToken);
 	const syncAllItems = useAction(api.plaidActions.syncAllItems);
+	const getGmailAuthUrl = useAction(api.gmailActions.getGmailAuthUrl);
+	const syncGmailAction = useAction(api.gmailActions.syncGmail);
 	const markTransactionMutation = useMutation(api.plaid.markTransaction);
+	const markAmazonItemMutation = useMutation(api.gmail.markAmazonItem);
 	const markCategoryExpectedMutation = useMutation(api.plaid.markCategoryExpected);
 	const markCategoryTransferMutation = useMutation(api.plaid.markCategoryTransfer);
 
@@ -71,7 +78,8 @@
 				transaction.merchantName,
 				transaction.categoryPrimary,
 				transaction.categoryDetailed,
-				transaction.userCategory
+				transaction.userCategory,
+				...(transaction.amazonItems?.map((item) => item.title) ?? [])
 			]
 				.filter(Boolean)
 				.some((value) => value!.toLowerCase().includes(term));
@@ -246,6 +254,34 @@
 		}
 	}
 
+	async function connectGmail() {
+		isConnectingGmail = true;
+		errorMessage = '';
+		statusMessage = 'Opening Google sign-in...';
+
+		try {
+			const { url } = await getGmailAuthUrl({ returnTo: window.location.origin });
+			window.location.href = url;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to start Gmail connection.';
+			isConnectingGmail = false;
+		}
+	}
+
+	async function syncGmail() {
+		isSyncingGmail = true;
+		errorMessage = '';
+
+		try {
+			const result = await syncGmailAction({});
+			statusMessage = `Gmail sync complete: ${result.imported} orders imported from ${result.scanned} messages.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to sync Gmail.';
+		} finally {
+			isSyncingGmail = false;
+		}
+	}
+
 	async function markTransaction(
 		transaction: {
 			id: Id<'transactions'>;
@@ -254,6 +290,7 @@
 			userCategory?: string | null;
 			categoryDetailed: string | null;
 			categoryPrimary: string | null;
+			amazonItems?: Array<{ title: string }>;
 		},
 		classification: MerchantClassification
 	) {
@@ -262,6 +299,20 @@
 
 		try {
 			const category = categoryFor(transaction);
+
+			// Amazon rows are keyed on the item's ASIN, so repeat purchases auto-classify
+			// without reclassifying every unrelated Amazon transaction.
+			if (transaction.amazonItems && transaction.amazonItems.length) {
+				const result = await markAmazonItemMutation({
+					transactionId: transaction.id,
+					classification,
+					...(category ? { category } : {})
+				});
+				const label = transaction.amazonItems[0].title;
+				statusMessage = `${label} will now be treated as ${classificationLabel(classification)} (${result.updated} matching transaction${result.updated === 1 ? '' : 's'}).`;
+				return;
+			}
+
 			await markTransactionMutation({
 				transactionId: transaction.id,
 				classification,
@@ -396,6 +447,47 @@
 					disabled={isSyncing || !plaidStatus.data?.connected}
 				>
 					{isSyncing ? 'Syncing...' : 'Sync now'}
+				</button>
+			</div>
+
+			<div class="panel-divider"></div>
+
+			<div>
+				<span class="panel-label">Gmail · Amazon</span>
+				{#if gmailStatus.isLoading}
+					<strong>Checking connection...</strong>
+				{:else if gmailStatus.data?.connected}
+					<strong>Connected</strong>
+					{#if gmailStatus.data.email}
+						<span class="panel-sub">{gmailStatus.data.email}</span>
+					{/if}
+				{:else if gmailStatus.data?.status === 'needs_reconnect'}
+					<strong>Reconnect needed</strong>
+				{:else}
+					<strong>Not connected</strong>
+				{/if}
+			</div>
+
+			<div class="button-row">
+				<button
+					class="button button-primary"
+					type="button"
+					onclick={connectGmail}
+					disabled={isConnectingGmail}
+				>
+					{isConnectingGmail
+						? 'Opening...'
+						: gmailStatus.data?.connected
+							? 'Reconnect Gmail'
+							: 'Connect Gmail'}
+				</button>
+				<button
+					class="button button-outline"
+					type="button"
+					onclick={syncGmail}
+					disabled={isSyncingGmail || !gmailStatus.data?.connected}
+				>
+					{isSyncingGmail ? 'Syncing...' : 'Sync Amazon'}
 				</button>
 			</div>
 
@@ -538,8 +630,20 @@
 							<tr>
 								<td data-label="Date">{transaction.date}</td>
 								<td data-label="Merchant">
-									<strong>{transaction.merchantName ?? transaction.name}</strong>
-									<span class="source-line">{transaction.source}</span>
+									{#if transaction.amazonItems && transaction.amazonItems.length}
+										{#each transaction.amazonItems as item, i (i)}
+											<strong
+												>{item.title}{#if item.quantity && item.quantity > 1}
+													×{item.quantity}{/if}</strong
+											>
+										{/each}
+										<span class="source-line"
+											>Amazon · {transaction.merchantName ?? transaction.name}</span
+										>
+									{:else}
+										<strong>{transaction.merchantName ?? transaction.name}</strong>
+										<span class="source-line">{transaction.source}</span>
+									{/if}
 									{#if transaction.pending}
 										<span class="pending-chip">Pending</span>
 									{/if}
@@ -712,6 +816,19 @@
 		flex-wrap: wrap;
 		gap: 0.75rem;
 		margin-top: 1.5rem;
+	}
+
+	.panel-divider {
+		height: 1px;
+		margin: 1.5rem 0;
+		background: rgb(222 216 207 / 70%);
+	}
+
+	.panel-sub {
+		display: block;
+		margin-top: 0.25rem;
+		color: var(--color-muted-foreground);
+		font-size: 0.9rem;
 	}
 
 	.button:disabled,
