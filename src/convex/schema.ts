@@ -291,6 +291,29 @@ export default defineSchema({
 		createdAt: v.number()
 	}).index('by_createdAt', ['createdAt']),
 
+	// AI-proposed new categories derived from the `uncategorized` bucket, awaiting the user's
+	// accept/dismiss. `members` are the merchant/ASIN units the AI grouped under the suggestion,
+	// so accepting can immediately move them out of Uncategorized.
+	categorySuggestions: defineTable({
+		slug: v.string(),
+		name: v.string(),
+		description: v.string(),
+		memberCount: v.number(),
+		weight: v.number(),
+		members: v.array(
+			v.object({
+				kind: v.union(v.literal('merchant'), v.literal('asin')),
+				key: v.string(),
+				title: v.optional(v.string()),
+				weight: v.number()
+			})
+		),
+		status: v.union(v.literal('pending'), v.literal('accepted'), v.literal('dismissed')),
+		model: v.optional(v.string()),
+		createdAt: v.number(),
+		updatedAt: v.number()
+	}).index('by_status', ['status']),
+
 	aiClassifications: defineTable({
 		transactionId: v.id('transactions'),
 		promptVersion: v.string(),

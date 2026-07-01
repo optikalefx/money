@@ -35,6 +35,7 @@
 
 	let selectedMonth = $state(initialMonth);
 	let searchTerm = $state('');
+	let amountSort = $state<'asc' | 'desc' | null>(null);
 	let isConnecting = $state(false);
 	let isSyncing = $state(false);
 	let isConnectingGmail = $state(false);
@@ -45,7 +46,12 @@
 
 	const monthStart = $derived(`${selectedMonth}-01`);
 	const monthEnd = $derived(lastDayOfMonth(selectedMonth));
-	const transactionArgs = $derived({ limit: 100 });
+	// Scope the recent-rows query to the selected month so the 100-row cap applies *within* the
+	// month, not globally. Otherwise picking an older month shows an empty queue because the 100
+	// most-recent rows are all from later months. Classification isn't narrowed server-side: the
+	// queue intentionally shows both `dynamic` and `unreviewed` rows (see effectiveClassification),
+	// and the index filter only matches a single classification value.
+	const transactionArgs = $derived({ limit: 100, startDate: monthStart, endDate: monthEnd });
 
 	// A rolling 12-month window that always includes the selected month, for the
 	// month-over-month breakdown (server-side, so it isn't limited to the recent-rows cap).
@@ -100,11 +106,18 @@
 				transaction.categoryPrimary,
 				transaction.categoryDetailed,
 				transaction.userCategory,
+				displayCategory(transaction),
 				...(transaction.amazonItems?.map((item) => item.title) ?? [])
 			]
 				.filter(Boolean)
 				.some((value) => value!.toLowerCase().includes(term));
 		});
+	});
+	// Optional amount sort layered on top of the filtered queue. Null keeps the default (date) order.
+	const sortedTransactions = $derived.by(() => {
+		if (!amountSort) return visibleTransactions;
+		const dir = amountSort === 'asc' ? 1 : -1;
+		return [...visibleTransactions].sort((a, b) => (a.amount - b.amount) * dir);
 	});
 	const dynamicRows = $derived(
 		allTransactions.filter(
@@ -180,6 +193,29 @@
 	function filterBySearch(label: string) {
 		searchTerm = searchTerm === label ? '' : label;
 	}
+
+	// Cycle the Amount column sort: none → ascending → descending → none.
+	function cycleAmountSort() {
+		amountSort = amountSort === null ? 'asc' : amountSort === 'asc' ? 'desc' : null;
+	}
+
+	// Filters that narrow the review queue, surfaced as dismissible chips by the title. The month
+	// chip only appears once the user has moved off the default (current) month.
+	const activeFilters = $derived.by(() => {
+		const filters: { key: string; label: string; clear: () => void }[] = [];
+		if (selectedMonth !== initialMonth) {
+			filters.push({
+				key: 'month',
+				label: formatMonthLong(selectedMonth),
+				clear: () => (selectedMonth = initialMonth)
+			});
+		}
+		const term = searchTerm.trim();
+		if (term) {
+			filters.push({ key: 'search', label: term, clear: () => (searchTerm = '') });
+		}
+		return filters;
+	});
 
 	function formatDate(timestamp: number | null) {
 		if (!timestamp) return 'Never';
@@ -515,7 +551,7 @@
 					onclick={connectPlaid}
 					disabled={isConnecting}
 				>
-					{isConnecting ? 'Connecting...' : 'Connect Plaid'}
+					{isConnecting ? 'Connecting...' : 'Connect Account'}
 				</button>
 				<button
 					class="button button-outline"
@@ -654,12 +690,18 @@
 
 			<div class="bar-list">
 				{#each canonicalCategoryRows as row (row.slug)}
-					<div class="bar-row static">
+					<button
+						type="button"
+						class="bar-row"
+						class:is-active={searchTerm === row.name}
+						title={`Filter review queue by ${row.name}`}
+						onclick={() => filterBySearch(row.name)}
+					>
 						<div>
 							<strong>{row.name}</strong>
 						</div>
 						<b>{formatAmount(row.total)}</b>
-					</div>
+					</button>
 				{:else}
 					<div class="empty-state">No categorized dynamic spend for this month.</div>
 				{/each}
@@ -700,7 +742,24 @@
 		<div class="section-heading">
 			<div>
 				<p class="eyebrow">Transactions</p>
-				<h2>Review queue</h2>
+				<div class="title-row">
+					<h2>Review queue</h2>
+					{#if activeFilters.length}
+						<div class="filter-chips">
+							{#each activeFilters as filter (filter.key)}
+								<button
+									type="button"
+									class="filter-chip"
+									onclick={filter.clear}
+									aria-label={`Clear ${filter.label} filter`}
+								>
+									<span>{filter.label}</span>
+									<span class="chip-x" aria-hidden="true">×</span>
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
 			</div>
 			{#if plaidStatus.data?.items[0]}
 				<span class="sync-chip">Last sync {formatDate(plaidStatus.data.items[0].lastSyncAt)}</span>
@@ -718,7 +777,6 @@
 						<col class="date-col" />
 						<col class="merchant-col" />
 						<col class="category-col" />
-						<col class="class-col" />
 						<col class="amount-col" />
 						<col class="actions-col" />
 					</colgroup>
@@ -727,13 +785,26 @@
 							<th>Date</th>
 							<th>Merchant</th>
 							<th>Category</th>
-							<th>Class</th>
-							<th class="amount-column">Amount</th>
+							<th
+								class="amount-column"
+								aria-sort={amountSort === 'asc'
+									? 'ascending'
+									: amountSort === 'desc'
+										? 'descending'
+										: 'none'}
+							>
+								<button type="button" class="sort-header" onclick={cycleAmountSort}>
+									Amount
+									<span class="sort-indicator" aria-hidden="true"
+										>{amountSort === 'asc' ? '↑' : amountSort === 'desc' ? '↓' : '↕'}</span
+									>
+								</button>
+							</th>
 							<th>Set merchant rule</th>
 						</tr>
 					</thead>
 					<tbody>
-						{#each visibleTransactions as transaction (transaction.id)}
+						{#each sortedTransactions as transaction (transaction.id)}
 							<tr>
 								<td data-label="Date">{transaction.date}</td>
 								<td data-label="Merchant">
@@ -749,7 +820,10 @@
 											>Gmail · {transaction.merchantName ?? transaction.name}</span
 										>
 									{:else}
-										<strong>{transaction.merchantName ?? transaction.name}</strong>
+										{@const merchant = transaction.merchantName ?? transaction.name}
+										<strong use:tooltip={merchant === transaction.name ? undefined : transaction.name}
+											>{merchant}</strong
+										>
 										<span class="source-line">{transaction.source}</span>
 									{/if}
 									{#if transaction.pending}
@@ -759,7 +833,7 @@
 								<td data-label="Category">
 									<div class="category-stack">
 										<span>{displayCategory(transaction)}</span>
-										{#if providerCategoryFor(transaction)}
+										{#if providerCategoryFor(transaction) && displayCategory(transaction) !== 'Uncategorized'}
 											<button
 												type="button"
 												class="text-action"
@@ -780,14 +854,6 @@
 											</button>
 										{/if}
 									</div>
-								</td>
-								<td data-label="Class">
-									<span class={`class-chip ${effectiveClassification(transaction)}`}>
-										{classificationLabel(effectiveClassification(transaction))}
-									</span>
-									{#if transaction.classificationSource !== 'default'}
-										<span class="source-line">{transaction.classificationSource}</span>
-									{/if}
 								</td>
 								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
 								>
@@ -1042,9 +1108,53 @@
 		font-size: clamp(1.45rem, 3vw, 2rem);
 	}
 
+	.title-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 1rem;
+		align-items: center;
+	}
+
+	.filter-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+
+	.filter-chip {
+		display: inline-flex;
+		gap: 0.4rem;
+		align-items: center;
+		padding: 0.35rem 0.45rem 0.35rem 0.75rem;
+		color: var(--color-primary);
+		background: rgb(93 112 82 / 12%);
+		border: 1px solid rgb(93 112 82 / 35%);
+		border-radius: var(--radius-pill);
+		font: inherit;
+		font-size: 0.82rem;
+		font-weight: 800;
+		line-height: 1;
+		cursor: pointer;
+		transition: background-color 200ms ease;
+	}
+
+	.filter-chip:hover {
+		background: rgb(93 112 82 / 22%);
+	}
+
+	.chip-x {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.15rem;
+		height: 1.15rem;
+		background: rgb(93 112 82 / 22%);
+		border-radius: 50%;
+		font-size: 1rem;
+	}
+
 	.sync-chip,
-	.pending-chip,
-	.class-chip {
+	.pending-chip {
 		display: inline-flex;
 		align-items: center;
 		width: fit-content;
@@ -1066,28 +1176,6 @@
 		padding: 0.3rem 0.5rem;
 		color: var(--color-secondary);
 		background: rgb(193 140 93 / 12%);
-	}
-
-	.class-chip {
-		padding: 0.45rem 0.62rem;
-		color: var(--color-muted-foreground);
-		background: var(--color-muted);
-		text-transform: capitalize;
-	}
-
-	.class-chip.dynamic {
-		color: var(--color-destructive);
-		background: rgb(168 84 72 / 12%);
-	}
-
-	.class-chip.expected {
-		color: var(--color-primary);
-		background: rgb(93 112 82 / 13%);
-	}
-
-	.class-chip.known_recurring {
-		color: var(--color-secondary);
-		background: rgb(193 140 93 / 14%);
 	}
 
 	.trend-section {
@@ -1169,14 +1257,6 @@
 	.bar-list {
 		display: grid;
 		gap: 0.8rem;
-	}
-
-	.bar-row.static {
-		cursor: default;
-	}
-
-	.bar-row.static:hover {
-		background: transparent;
 	}
 
 	.bar-row {
@@ -1268,15 +1348,11 @@
 	}
 
 	.merchant-col {
-		width: 15%;
+		width: 26%;
 	}
 
 	.category-col {
 		width: 28%;
-	}
-
-	.class-col {
-		width: 11%;
 	}
 
 	.amount-col {
@@ -1324,6 +1400,34 @@
 	.amount-column {
 		text-align: right;
 		font-weight: 900;
+	}
+
+	.sort-header {
+		display: inline-flex;
+		gap: 0.35rem;
+		align-items: center;
+		padding: 0;
+		color: inherit;
+		background: transparent;
+		border: 0;
+		font: inherit;
+		font-size: 0.78rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		cursor: pointer;
+	}
+
+	.sort-header:hover {
+		color: var(--color-primary);
+	}
+
+	.sort-indicator {
+		font-size: 0.85rem;
+	}
+
+	th[aria-sort='ascending'] .sort-header,
+	th[aria-sort='descending'] .sort-header {
+		color: var(--color-primary);
 	}
 
 	.category-stack {

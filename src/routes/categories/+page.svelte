@@ -3,6 +3,7 @@
 	import { useAction, useMutation, useQuery } from 'convex-svelte';
 	import { api } from '../../convex/_generated/api.js';
 	import type { Id } from '../../convex/_generated/dataModel.js';
+	import SuggestionTransactions from '$lib/SuggestionTransactions.svelte';
 
 	type CategoryRow = {
 		id: Id<'categories'>;
@@ -20,14 +21,33 @@
 	const deleteCategory = useMutation(api.categories.deleteCategory);
 	const setAiConfig = useMutation(api.categories.setAiConfig);
 	const categorize = useAction(api.aiActions.categorizeTransactions);
+	const suggestions = useQuery(api.categories.listCategorySuggestions, () => ({}));
+	const suggestCategories = useAction(api.aiActions.suggestCategories);
+	const acceptSuggestion = useMutation(api.categories.acceptCategorySuggestion);
+	const dismissSuggestion = useMutation(api.categories.dismissCategorySuggestion);
+
+	type Suggestion = {
+		id: Id<'categorySuggestions'>;
+		name: string;
+		description: string;
+		memberCount: number;
+		weight: number;
+		sampleTitles: string[];
+	};
 
 	let newName = $state('');
 	let newDescription = $state('');
 	let drafts = $state<Record<string, { name: string; description: string }>>({});
 	let savingId = $state<string | null>(null);
 	let isCategorizing = $state(false);
+	let forceRun = $state(false);
+	let isSuggesting = $state(false);
+	let suggestionActionId = $state<string | null>(null);
+	let expandedSuggestionId = $state<string | null>(null);
 	let statusMessage = $state('');
 	let errorMessage = $state('');
+
+	const suggestionRows = $derived((suggestions.data ?? []) as Suggestion[]);
 
 	// AI config: fall back to the saved value from the query until the user edits a field.
 	let providerOverride = $state<'openai' | 'anthropic' | null>(null);
@@ -112,15 +132,60 @@
 		errorMessage = '';
 		statusMessage = 'Categorizing transactions with AI...';
 		try {
-			const result = await categorize({});
+			const result = await categorize({ force: forceRun });
 			statusMessage =
 				result.categorized === 0
 					? 'Nothing to categorize — everything is already cached.'
-					: `Categorized ${result.categorized} merchant/item${result.categorized === 1 ? '' : 's'}, applied to ${result.applied} record${result.applied === 1 ? '' : 's'}.`;
+					: `Categorized ${result.merchantUnits} merchant${result.merchantUnits === 1 ? '' : 's'} + ${result.asinUnits} Amazon item${result.asinUnits === 1 ? '' : 's'} in ${result.chunks} AI call${result.chunks === 1 ? '' : 's'}, applied to ${result.applied} record${result.applied === 1 ? '' : 's'}.`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to categorize.';
 		} finally {
 			isCategorizing = false;
+		}
+	}
+
+	async function runSuggest() {
+		isSuggesting = true;
+		errorMessage = '';
+		statusMessage = 'Asking the AI for new category ideas...';
+		try {
+			const result = await suggestCategories({});
+			statusMessage =
+				result.suggested === 0
+					? result.uncategorizedUnits === 0
+						? 'Nothing uncategorized — no suggestions needed.'
+						: 'The AI had no new categories to suggest.'
+					: `${result.suggested} suggestion${result.suggested === 1 ? '' : 's'} from ${result.consideredUnits} uncategorized item${result.consideredUnits === 1 ? '' : 's'}. Review below.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to suggest categories.';
+		} finally {
+			isSuggesting = false;
+		}
+	}
+
+	async function acceptOne(suggestion: Suggestion) {
+		suggestionActionId = suggestion.id;
+		errorMessage = '';
+		try {
+			const result = await acceptSuggestion({ id: suggestion.id });
+			statusMessage = `Added ${suggestion.name} and moved ${result.applied} record${result.applied === 1 ? '' : 's'} into it.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to accept suggestion.';
+		} finally {
+			suggestionActionId = null;
+		}
+	}
+
+	async function dismissOne(suggestion: Suggestion) {
+		suggestionActionId = suggestion.id;
+		errorMessage = '';
+		try {
+			await dismissSuggestion({ id: suggestion.id });
+			statusMessage = `Dismissed ${suggestion.name}.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to dismiss suggestion.';
+		} finally {
+			suggestionActionId = null;
 		}
 	}
 </script>
@@ -185,15 +250,96 @@
 				{savingConfig ? 'Saving...' : 'Save AI settings'}
 			</button>
 		</div>
-		<button
-			class="button button-primary"
-			type="button"
-			onclick={runCategorize}
-			disabled={isCategorizing}
-		>
-			{isCategorizing ? 'Categorizing...' : 'Categorize transactions'}
-		</button>
+		<div class="categorize-actions">
+			<label class="force-toggle">
+				<input type="checkbox" bind:checked={forceRun} />
+				<span>Re-run all (ignore cache)</span>
+			</label>
+			<div class="button-row">
+				<button
+					class="button button-outline"
+					type="button"
+					onclick={runSuggest}
+					disabled={isSuggesting}
+				>
+					{isSuggesting ? 'Thinking...' : 'Suggest categories'}
+				</button>
+				<button
+					class="button button-primary"
+					type="button"
+					onclick={runCategorize}
+					disabled={isCategorizing}
+				>
+					{isCategorizing ? 'Categorizing...' : 'Categorize transactions'}
+				</button>
+			</div>
+		</div>
 	</section>
+
+	{#if suggestionRows.length}
+		<section class="suggest-panel organic-surface">
+			<div class="section-heading">
+				<div>
+					<p class="eyebrow">AI suggestions</p>
+					<h2>New categories from your Uncategorized spend</h2>
+				</div>
+			</div>
+			<div class="suggestion-list">
+				{#each suggestionRows as suggestion (suggestion.id)}
+					{@const isExpanded = expandedSuggestionId === suggestion.id}
+					<article class="suggestion-card">
+						<div class="suggestion-head">
+							<div class="suggestion-main">
+								<div class="suggestion-title">
+									<strong>{suggestion.name}</strong>
+									<span class="suggestion-count"
+										>{suggestion.weight} txn{suggestion.weight === 1 ? '' : 's'} · {suggestion.memberCount}
+										merchant/item{suggestion.memberCount === 1 ? '' : 's'}</span
+									>
+								</div>
+								{#if suggestion.description}
+									<p class="suggestion-desc">{suggestion.description}</p>
+								{/if}
+								{#if suggestion.sampleTitles.length && !isExpanded}
+									<p class="suggestion-samples">e.g. {suggestion.sampleTitles.join(', ')}</p>
+								{/if}
+								<button
+									type="button"
+									class="text-action expand-toggle"
+									aria-expanded={isExpanded}
+									onclick={() =>
+										(expandedSuggestionId = isExpanded ? null : suggestion.id)}
+								>
+									{isExpanded ? 'Hide transactions ▾' : 'Show transactions ▸'}
+								</button>
+							</div>
+							<div class="suggestion-actions">
+								<button
+									type="button"
+									class="button button-primary"
+									disabled={suggestionActionId === suggestion.id}
+									onclick={() => acceptOne(suggestion)}
+								>
+									Accept
+								</button>
+								<button
+									type="button"
+									class="text-action"
+									disabled={suggestionActionId === suggestion.id}
+									onclick={() => dismissOne(suggestion)}
+								>
+									Dismiss
+								</button>
+							</div>
+						</div>
+						{#if isExpanded}
+							<SuggestionTransactions id={suggestion.id} />
+						{/if}
+					</article>
+				{/each}
+			</div>
+		</section>
+	{/if}
 
 	<section class="add-panel organic-surface">
 		<h2>Add a category</h2>
@@ -342,6 +488,127 @@
 		flex-wrap: wrap;
 		gap: 1rem;
 		align-items: end;
+	}
+
+	.categorize-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		align-items: end;
+	}
+
+	.force-toggle {
+		display: flex;
+		flex-direction: row;
+		gap: 0.45rem;
+		align-items: center;
+		color: var(--color-muted-foreground);
+		font-size: 0.82rem;
+		font-weight: 800;
+	}
+
+	.force-toggle input {
+		width: auto;
+		min-height: 0;
+		margin: 0;
+	}
+
+	.button-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.6rem;
+	}
+
+	.suggest-panel {
+		margin-bottom: 1.25rem;
+		padding: 1.5rem;
+		border-radius: 2rem 3.5rem 2rem 2.75rem;
+	}
+
+	.section-heading {
+		margin-bottom: 1.25rem;
+	}
+
+	.section-heading h2 {
+		margin: 0.25rem 0 0;
+		font-size: clamp(1.3rem, 3vw, 1.8rem);
+	}
+
+	.suggestion-list {
+		display: grid;
+		gap: 1rem;
+	}
+
+	.suggestion-card {
+		padding: 1.1rem 1.25rem;
+		background: rgb(254 254 250 / 82%);
+		border: 1px solid rgb(222 216 207 / 70%);
+		border-radius: 1.4rem 2.2rem 1.5rem 1.9rem;
+	}
+
+	.suggestion-head {
+		display: flex;
+		gap: 1.5rem;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.expand-toggle {
+		margin-top: 0.5rem;
+		color: var(--color-primary);
+	}
+
+	.suggestion-main {
+		min-width: 0;
+	}
+
+	.suggestion-title {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 0.75rem;
+		align-items: baseline;
+	}
+
+	.suggestion-title strong {
+		font-size: 1.15rem;
+		font-weight: 900;
+	}
+
+	.suggestion-count {
+		color: var(--color-primary);
+		font-size: 0.8rem;
+		font-weight: 800;
+	}
+
+	.suggestion-desc {
+		margin: 0.35rem 0 0;
+		color: var(--color-foreground);
+		font-size: 0.92rem;
+	}
+
+	.suggestion-samples {
+		margin: 0.3rem 0 0;
+		color: var(--color-muted-foreground);
+		font-size: 0.82rem;
+	}
+
+	.suggestion-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		align-items: end;
+	}
+
+	@media (max-width: 640px) {
+		.suggestion-head {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.suggestion-actions {
+			flex-direction: row;
+			align-items: center;
+		}
 	}
 
 	.add-panel {

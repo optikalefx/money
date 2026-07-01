@@ -1,5 +1,6 @@
 'use node';
 
+import { v } from 'convex/values';
 import { action, env } from './_generated/server';
 import { internal } from './_generated/api';
 import { generateObject } from 'ai';
@@ -39,9 +40,21 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 export const categorizeTransactions = action({
-	args: {},
-	handler: async (ctx): Promise<{ categorized: number; skipped: number; applied: number }> => {
-		const input = await ctx.runQuery(internal.categories.getCategorizationInput, {});
+	args: { force: v.optional(v.boolean()) },
+	handler: async (
+		ctx,
+		args
+	): Promise<{
+		categorized: number;
+		skipped: number;
+		applied: number;
+		merchantUnits: number;
+		asinUnits: number;
+		chunks: number;
+	}> => {
+		const input = await ctx.runQuery(internal.categories.getCategorizationInput, {
+			force: args.force ?? false
+		});
 
 		const units: Unit[] = [
 			...input.merchantUnits.map((m) => ({ kind: 'merchant' as const, ...m })),
@@ -49,7 +62,8 @@ export const categorizeTransactions = action({
 		];
 
 		if (units.length === 0) {
-			return { categorized: 0, skipped: 0, applied: 0 };
+			console.log('[categorize] nothing to do — all merchants/ASINs already cached.');
+			return { categorized: 0, skipped: 0, applied: 0, merchantUnits: 0, asinUnits: 0, chunks: 0 };
 		}
 
 		const validSlugs = new Set(input.categories.map((c) => c.slug));
@@ -64,13 +78,20 @@ export const categorizeTransactions = action({
 			results: z.array(z.object({ index: z.number(), slug: z.string() }))
 		});
 
+		const groups = chunk(
+			units.map((unit, index) => ({ unit, index })),
+			CHUNK_SIZE
+		);
+		console.log(
+			`[categorize] model=${modelLabel} · ${input.merchantUnits.length} merchants + ` +
+				`${input.asinUnits.length} ASINs = ${units.length} distinct units in ${groups.length} chunk(s).`
+		);
+
 		// Map each global unit index -> chosen slug (clamped to a known category).
 		const slugByIndex = new Map<number, string>();
 
-		for (const group of chunk(
-			units.map((unit, index) => ({ unit, index })),
-			CHUNK_SIZE
-		)) {
+		for (let chunkIndex = 0; chunkIndex < groups.length; chunkIndex++) {
+			const group = groups[chunkIndex];
 			const lines = group.map(({ unit, index }) => {
 				if (unit.kind === 'merchant') {
 					const plaid = unit.plaidCategory ? `, plaid category "${unit.plaidCategory}"` : '';
@@ -79,14 +100,28 @@ export const categorizeTransactions = action({
 				return `${index}. [amazon item] "${unit.title}"`;
 			});
 
-			const { object } = await generateObject({
-				model,
-				schema,
-				prompt:
-					`You are categorizing personal spending. Assign each item below to exactly one ` +
-					`category slug from this list:\n\n${taxonomy}\n\n` +
-					`If nothing fits, use "uncategorized". Items:\n\n${lines.join('\n')}\n\n` +
-					`Return one result per item using the numeric index shown.`
+			const prompt =
+				`You are categorizing personal spending. Assign each item below to exactly one ` +
+				`category slug from this list:\n\n${taxonomy}\n\n` +
+				`If nothing fits, use "uncategorized". Items:\n\n${lines.join('\n')}\n\n` +
+				`Return one result per item using the numeric index shown.`;
+
+			const { object, usage } = await generateObject({ model, schema, prompt });
+
+			// Log the full prompt + response so it's visible in `npx convex logs` / the dashboard.
+			console.log(
+				`[categorize] chunk ${chunkIndex + 1}/${groups.length} (${group.length} units) usage=${JSON.stringify(usage)}\n--- PROMPT ---\n${prompt}\n--- RESPONSE ---\n${JSON.stringify(object.results)}`
+			);
+			// And persist it durably for later inspection via categories:listAiRuns.
+			await ctx.runMutation(internal.categories.recordAiRun, {
+				kind: 'categorization',
+				model: modelLabel,
+				chunkIndex,
+				chunkCount: groups.length,
+				unitCount: group.length,
+				prompt,
+				results: object.results,
+				usage
 			});
 
 			for (const result of object.results) {
@@ -121,6 +156,132 @@ export const categorizeTransactions = action({
 			asins
 		});
 
-		return { categorized, skipped, applied };
+		console.log(
+			`[categorize] done — ${categorized} units categorized, applied to ${applied} record(s).`
+		);
+		return {
+			categorized,
+			skipped,
+			applied,
+			merchantUnits: input.merchantUnits.length,
+			asinUnits: input.asinUnits.length,
+			chunks: groups.length
+		};
+	}
+});
+
+// Cap how many uncategorized units we show the model in one shot, and how many new
+// categories it may propose.
+const MAX_SUGGEST_UNITS = 200;
+const MAX_SUGGESTIONS = 8;
+
+// Look at everything currently in "Uncategorized" and propose new categories that would cover
+// it, grouping each uncategorized merchant/item under a proposal so we can show projected counts.
+export const suggestCategories = action({
+	args: {},
+	handler: async (
+		ctx
+	): Promise<{ suggested: number; uncategorizedUnits: number; consideredUnits: number }> => {
+		const input = await ctx.runQuery(internal.categories.getUncategorizedUnits, {});
+		if (input.units.length === 0) {
+			await ctx.runMutation(internal.categories.persistCategorySuggestions, {
+				model: `${input.aiProvider}:${input.aiModel}`,
+				suggestions: []
+			});
+			return { suggested: 0, uncategorizedUnits: 0, consideredUnits: 0 };
+		}
+
+		// Show the model the highest-weight uncategorized units first.
+		const units = [...input.units].sort((a, b) => b.weight - a.weight).slice(0, MAX_SUGGEST_UNITS);
+		const model = resolveModel(input.aiProvider, input.aiModel);
+		const modelLabel = `${input.aiProvider}:${input.aiModel}`;
+
+		const existing = input.categories
+			.map((c) => `- ${c.slug}: ${c.name}${c.description ? ` — ${c.description}` : ''}`)
+			.join('\n');
+		const lines = units.map((unit, index) =>
+			unit.kind === 'merchant'
+				? `${index}. [merchant] "${unit.name}"${unit.plaidCategory ? ` (plaid: ${unit.plaidCategory})` : ''} — seen ${unit.weight}x`
+				: `${index}. [amazon item] "${unit.title}" — bought ${unit.weight}x`
+		);
+
+		const schema = z.object({
+			categories: z.array(
+				z.object({ slug: z.string(), name: z.string(), description: z.string() })
+			),
+			assignments: z.array(z.object({ index: z.number(), slug: z.string() }))
+		});
+
+		const prompt =
+			`A user tracks personal spending with these existing categories:\n\n${existing}\n\n` +
+			`The purchases below could not be confidently placed in any of them. Propose up to ` +
+			`${MAX_SUGGESTIONS} NEW categories (clearly distinct from the existing ones) that would ` +
+			`group these purchases well. Use short lowercase-hyphenated slugs and a one-line ` +
+			`description for each. Then assign every item to one of YOUR proposed slugs, or "none" ` +
+			`if it truly fits none. Prefer fewer, broader categories over many tiny ones.\n\n` +
+			`Items:\n\n${lines.join('\n')}`;
+
+		const { object, usage } = await generateObject({ model, schema, prompt });
+
+		console.log(
+			`[suggest] ${units.length} uncategorized units -> ${object.categories.length} proposed. usage=${JSON.stringify(usage)}\n--- PROMPT ---\n${prompt}\n--- RESPONSE ---\n${JSON.stringify(object)}`
+		);
+		await ctx.runMutation(internal.categories.recordAiRun, {
+			kind: 'suggestion',
+			model: modelLabel,
+			chunkIndex: 0,
+			chunkCount: 1,
+			unitCount: units.length,
+			prompt,
+			results: object,
+			usage
+		});
+
+		// Keep proposals that don't collide with an existing slug, and group members under them.
+		const existingSlugs = new Set(input.categories.map((c) => c.slug));
+		const proposals = new Map<
+			string,
+			{
+				slug: string;
+				name: string;
+				description: string;
+				members: Array<{ kind: 'merchant' | 'asin'; key: string; title?: string; weight: number }>;
+			}
+		>();
+		for (const category of object.categories) {
+			if (!category.slug || existingSlugs.has(category.slug)) continue;
+			if (proposals.has(category.slug)) continue;
+			proposals.set(category.slug, {
+				slug: category.slug,
+				name: category.name,
+				description: category.description ?? '',
+				members: []
+			});
+		}
+
+		for (const assignment of object.assignments) {
+			const proposal = proposals.get(assignment.slug);
+			const unit = units[assignment.index];
+			if (!proposal || !unit) continue;
+			proposal.members.push({
+				kind: unit.kind,
+				key: unit.key,
+				title: unit.kind === 'merchant' ? unit.name : unit.title,
+				weight: unit.weight
+			});
+		}
+
+		const suggestions = [...proposals.values()].filter((proposal) => proposal.members.length > 0);
+		await ctx.runMutation(internal.categories.persistCategorySuggestions, {
+			model: modelLabel,
+			suggestions
+		});
+
+		console.log(`[suggest] persisted ${suggestions.length} suggestion(s) with members.`);
+		return {
+			suggested: suggestions.length,
+			uncategorizedUnits: input.units.length,
+			consideredUnits: units.length
+		};
 	}
 });
