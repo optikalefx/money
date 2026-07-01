@@ -61,37 +61,37 @@ before accepting a scan-plus-filter pattern.
 ```ts
 // Bad: scans then filters in JavaScript
 export const listOpen = query({
-  args: {},
-  handler: async (ctx) => {
-    const tasks = await ctx.db.query("tasks").collect();
-    return tasks.filter((task) => task.status === "open");
-  },
+	args: {},
+	handler: async (ctx) => {
+		const tasks = await ctx.db.query('tasks').collect();
+		return tasks.filter((task) => task.status === 'open');
+	}
 });
 ```
 
 ```ts
 // Also bad: Convex .filter() does not push to storage either
 export const listOpen = query({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db
-      .query("tasks")
-      .filter((q) => q.eq(q.field("status"), "open"))
-      .collect();
-  },
+	args: {},
+	handler: async (ctx) => {
+		return await ctx.db
+			.query('tasks')
+			.filter((q) => q.eq(q.field('status'), 'open'))
+			.collect();
+	}
 });
 ```
 
 ```ts
 // Good: use an index so storage does the filtering
 export const listOpen = query({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db
-      .query("tasks")
-      .withIndex("by_status", (q) => q.eq("status", "open"))
-      .collect();
-  },
+	args: {},
+	handler: async (ctx) => {
+		return await ctx.db
+			.query('tasks')
+			.withIndex('by_status', (q) => q.eq('status', 'open'))
+			.collect();
+	}
 });
 ```
 
@@ -117,10 +117,10 @@ rollout and consult the `convex-migration-helper` skill.
 ```ts
 // Bad: optional booleans can miss older rows where the field is undefined
 const projects = await ctx.db
-  .query("projects")
-  .withIndex("by_archived_and_updated", (q) => q.eq("isArchived", false))
-  .order("desc")
-  .take(20);
+	.query('projects')
+	.withIndex('by_archived_and_updated', (q) => q.eq('isArchived', false))
+	.order('desc')
+	.take(20);
 ```
 
 ```ts
@@ -137,17 +137,17 @@ and delete.
 
 ```ts
 // Bad: two indexes where one would do
-defineTable({ team: v.id("teams"), user: v.id("users") })
-  .index("by_team", ["team"])
-  .index("by_team_and_user", ["team", "user"]);
+defineTable({ team: v.id('teams'), user: v.id('users') })
+	.index('by_team', ['team'])
+	.index('by_team_and_user', ['team', 'user']);
 ```
 
 ```ts
 // Good: single compound index serves both query patterns
-defineTable({ team: v.id("teams"), user: v.id("users") }).index(
-  "by_team_and_user",
-  ["team", "user"],
-);
+defineTable({ team: v.id('teams'), user: v.id('users') }).index('by_team_and_user', [
+	'team',
+	'user'
+]);
 ```
 
 Exception: `.index("by_foo", ["foo"])` is really an index on `foo` +
@@ -190,20 +190,19 @@ Rules:
 
 ```ts
 // Bad: missing denormalized data becomes a placeholder and blocks correctness
-const ownerName = project.ownerName ?? "Unknown owner";
+const ownerName = project.ownerName ?? 'Unknown owner';
 ```
 
 ```ts
 // Good: denormalized data is an optimization, not the only source of truth
-const ownerName =
-  project.ownerName ?? (await ctx.db.get(project.ownerId))?.name ?? null;
+const ownerName = project.ownerName ?? (await ctx.db.get(project.ownerId))?.name ?? null;
 ```
 
 Bad lookup map pattern:
 
 ```ts
 const ownersById = {
-  [project.ownerId]: { ownerName: null },
+	[project.ownerId]: { ownerName: null }
 };
 ```
 
@@ -213,9 +212,9 @@ Good lookup map pattern:
 
 ```ts
 const ownersById =
-  project.ownerName !== undefined && project.ownerName !== null
-    ? { [project.ownerId]: { ownerName: project.ownerName } }
-    : {};
+	project.ownerName !== undefined && project.ownerName !== null
+		? { [project.ownerId]: { ownerName: project.ownerName } }
+		: {};
 ```
 
 ### No denormalized copy yet
@@ -259,18 +258,18 @@ Digest tables are a tradeoff, not a default:
 ```ts
 // Bad: list page reads source docs, then joins owner data per row
 const projects = await ctx.db
-  .query("projects")
-  .withIndex("by_public", (q) => q.eq("isPublic", true))
-  .collect();
+	.query('projects')
+	.withIndex('by_public', (q) => q.eq('isPublic', true))
+	.collect();
 ```
 
 ```ts
 // Good: list page reads the smaller digest shape first
 const projects = await ctx.db
-  .query("projectDigests")
-  .withIndex("by_public_and_updated", (q) => q.eq("isPublic", true))
-  .order("desc")
-  .take(20);
+	.query('projectDigests')
+	.withIndex('by_public_and_updated', (q) => q.eq('isPublic', true))
+	.order('desc')
+	.take(20);
 ```
 
 ## 4. Isolate Frequently-Updated Fields
@@ -287,21 +286,21 @@ much if three other mutations still update the same widely-read document.
 ```ts
 // Bad: every presence heartbeat invalidates subscribers to the whole profile
 await ctx.db.patch(user._id, {
-  name: args.name,
-  avatarUrl: args.avatarUrl,
-  lastSeen: Date.now(),
+	name: args.name,
+	avatarUrl: args.avatarUrl,
+	lastSeen: Date.now()
 });
 ```
 
 ```ts
 // Good: keep profile reads stable, move heartbeat updates to a separate document
 await ctx.db.patch(user._id, {
-  name: args.name,
-  avatarUrl: args.avatarUrl,
+	name: args.name,
+	avatarUrl: args.avatarUrl
 });
 
 await ctx.db.patch(presence._id, {
-  lastSeen: Date.now(),
+	lastSeen: Date.now()
 });
 ```
 

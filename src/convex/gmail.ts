@@ -276,13 +276,22 @@ export const upsertAmazonOrder = internalMutation({
 		}
 
 		for (const item of args.items) {
+			// Inherit a previously-resolved AI category for this ASIN so re-parsing/new orders
+			// stay categorized without another AI call.
+			const cachedCategory = item.asin
+				? await ctx.db
+						.query('amazonItemCategories')
+						.withIndex('by_asin', (q) => q.eq('asin', item.asin!))
+						.unique()
+				: null;
 			await ctx.db.insert('amazonOrderItems', {
 				amazonOrderId: orderId,
 				asin: item.asin,
 				title: item.title,
 				quantity: item.quantity,
 				amount: item.amount,
-				category: item.category,
+				category: cachedCategory?.categorySlug ?? item.category,
+				categorySource: cachedCategory ? 'ai' : undefined,
 				classification: 'dynamic',
 				importedAt: now,
 				updatedAt: now

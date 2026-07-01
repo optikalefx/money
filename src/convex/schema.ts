@@ -90,6 +90,9 @@ export default defineSchema({
 		categoryPrimary: v.optional(v.string()),
 		categoryDetailed: v.optional(v.string()),
 		userCategory: v.optional(v.string()),
+		// Resolved canonical category (slug) for the month-over-month dashboard.
+		categorySlug: v.optional(v.string()),
+		categorySource: v.optional(v.union(v.literal('ai'), v.literal('manual'))),
 		classification: transactionClassification,
 		classificationSource: classificationSource,
 		classificationConfidence: v.optional(v.number()),
@@ -199,7 +202,9 @@ export default defineSchema({
 		title: v.string(),
 		quantity: v.optional(v.number()),
 		amount: v.optional(v.number()),
+		// Resolved canonical category (slug) stored in `category`; source tracks who set it.
 		category: v.optional(v.string()),
+		categorySource: v.optional(v.union(v.literal('ai'), v.literal('manual'))),
 		classification: transactionClassification,
 		importedAt: v.number(),
 		updatedAt: v.number()
@@ -224,6 +229,67 @@ export default defineSchema({
 	})
 		.index('by_active', ['active'])
 		.index('by_asin', ['asin']),
+
+	// User-editable canonical taxonomy. Every category is AI-driven: `description` tells the
+	// AI how to decide a transaction belongs here (may be blank when the name is self-evident).
+	categories: defineTable({
+		slug: v.string(),
+		name: v.string(),
+		description: v.optional(v.string()),
+		color: v.optional(v.string()),
+		sortOrder: v.number(),
+		active: v.boolean(),
+		isDefault: v.boolean(),
+		createdAt: v.number(),
+		updatedAt: v.number()
+	})
+		.index('by_active', ['active'])
+		.index('by_slug', ['slug']),
+
+	// Per-merchant AI category cache for non-Amazon transactions, so each merchant is
+	// categorized once and future syncs inherit without another AI call.
+	merchantCategories: defineTable({
+		normalizedMerchant: v.string(),
+		categorySlug: v.string(),
+		source: v.union(v.literal('ai'), v.literal('manual')),
+		model: v.optional(v.string()),
+		active: v.boolean(),
+		createdAt: v.number(),
+		updatedAt: v.number()
+	}).index('by_normalizedMerchant', ['normalizedMerchant']),
+
+	// Per-ASIN AI category cache so each Amazon item is categorized once and new orders inherit.
+	amazonItemCategories: defineTable({
+		asin: v.string(),
+		title: v.optional(v.string()),
+		categorySlug: v.string(),
+		source: v.union(v.literal('ai'), v.literal('manual')),
+		model: v.optional(v.string()),
+		active: v.boolean(),
+		createdAt: v.number(),
+		updatedAt: v.number()
+	}).index('by_asin', ['asin']),
+
+	// Single-row app configuration for the pluggable AI provider/model.
+	appConfig: defineTable({
+		aiProvider: v.union(v.literal('openai'), v.literal('anthropic')),
+		aiModel: v.string(),
+		updatedAt: v.number()
+	}),
+
+	// Durable audit trail of AI categorization calls: the exact prompt sent, the parsed
+	// response, and token usage, one row per chunk. Lets you inspect what the AI saw/returned.
+	aiRuns: defineTable({
+		kind: v.string(),
+		model: v.string(),
+		chunkIndex: v.number(),
+		chunkCount: v.number(),
+		unitCount: v.number(),
+		prompt: v.string(),
+		results: v.any(),
+		usage: v.optional(v.any()),
+		createdAt: v.number()
+	}).index('by_createdAt', ['createdAt']),
 
 	aiClassifications: defineTable({
 		transactionId: v.id('transactions'),

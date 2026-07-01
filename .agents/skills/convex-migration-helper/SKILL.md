@@ -1,7 +1,6 @@
 ---
 name: convex-migration-helper
-description:
-  Plans Convex schema and data migrations with widen-migrate-narrow and
+description: Plans Convex schema and data migrations with widen-migrate-narrow and
   @convex-dev/migrations. Use for breaking schema changes, backfills, table
   reshaping, or zero-downtime rollouts.
 ---
@@ -64,13 +63,13 @@ it existed.
 ```typescript
 // Before
 users: defineTable({
-  name: v.string(),
+	name: v.string()
 });
 
 // After - safe, new field is optional
 users: defineTable({
-  name: v.string(),
-  bio: v.optional(v.string()),
+	name: v.string(),
+	bio: v.optional(v.string())
 });
 ```
 
@@ -78,18 +77,18 @@ users: defineTable({
 
 ```typescript
 posts: defineTable({
-  userId: v.id("users"),
-  title: v.string(),
-}).index("by_user", ["userId"]);
+	userId: v.id('users'),
+	title: v.string()
+}).index('by_user', ['userId']);
 ```
 
 ### Adding Index
 
 ```typescript
 users: defineTable({
-  name: v.string(),
-  email: v.string(),
-}).index("by_email", ["email"]);
+	name: v.string(),
+	email: v.string()
+}).index('by_email', ['email']);
 ```
 
 ## Breaking Changes: The Deployment Workflow

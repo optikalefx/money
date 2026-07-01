@@ -17,11 +17,17 @@
 		categoryPrimary: string | null;
 		categoryDetailed: string | null;
 		userCategory?: string | null;
+		categorySlug?: string | null;
 		classification: Classification;
 		classificationSource: string;
 		source: string;
 		removed?: boolean;
-		amazonItems?: Array<{ title: string; quantity: number | null; amount: number | null }>;
+		amazonItems?: Array<{
+			title: string;
+			quantity: number | null;
+			amount: number | null;
+			category?: string | null;
+		}>;
 	};
 
 	const today = new Date();
@@ -41,10 +47,21 @@
 	const monthEnd = $derived(lastDayOfMonth(selectedMonth));
 	const transactionArgs = $derived({ limit: 100 });
 
+	// A rolling 12-month window that always includes the selected month, for the
+	// month-over-month breakdown (server-side, so it isn't limited to the recent-rows cap).
+	const windowStart = $derived(shiftMonth(minMonth(initialMonth, selectedMonth), -11));
+	const windowEnd = $derived(maxMonth(initialMonth, selectedMonth));
+
 	const plaidStatus = useQuery(api.plaid.getConnectionStatus, () => ({}));
 	const transactions = useQuery(api.plaid.listRecentTransactions, () => transactionArgs, {
 		keepPreviousData: true
 	});
+	const monthlyBreakdown = useQuery(
+		api.plaid.getMonthlyDynamicBreakdown,
+		() => ({ startMonth: windowStart, endMonth: windowEnd }),
+		{ keepPreviousData: true }
+	);
+	const categoriesQuery = useQuery(api.categories.listCategories, () => ({}));
 	const gmailStatus = useQuery(api.gmail.getConnectionStatus, () => ({}));
 	const createLinkToken = useAction(api.plaidActions.createLinkToken);
 	const exchangePublicToken = useAction(api.plaidActions.exchangePublicToken);
@@ -61,6 +78,9 @@
 		currency: 'USD'
 	});
 
+	const categoryNames = $derived(
+		new Map((categoriesQuery.data ?? []).map((category) => [category.slug, category.name]))
+	);
 	const allTransactions = $derived((transactions.data ?? []) as TransactionRow[]);
 	const visibleTransactions = $derived.by(() => {
 		const term = searchTerm.trim().toLowerCase();
@@ -96,19 +116,6 @@
 				transaction.date <= monthEnd
 		)
 	);
-	const dynamicTotal = $derived(
-		dynamicRows.reduce((sum, transaction) => sum + transaction.amount, 0)
-	);
-	const dynamicByCategory = $derived(
-		summarizeBy(
-			dynamicRows,
-			(transaction) =>
-				transaction.userCategory ??
-				transaction.categoryDetailed ??
-				transaction.categoryPrimary ??
-				'Uncategorized'
-		)
-	);
 	const dynamicByMerchant = $derived(
 		summarizeBy(dynamicRows, (transaction) => transaction.merchantName ?? transaction.name)
 	);
@@ -121,10 +128,49 @@
 				transaction.date <= monthEnd
 		).length
 	);
+	// Month-over-month view (server-computed, canonical categories incl. exploded Amazon items).
+	const monthlyMonths = $derived(monthlyBreakdown.data?.months ?? []);
+	const selectedMonthBreakdown = $derived(
+		monthlyMonths.find((entry) => entry.month === selectedMonth)
+	);
+	const dynamicTotalMonthly = $derived(selectedMonthBreakdown?.total ?? 0);
+	const canonicalCategoryRows = $derived(selectedMonthBreakdown?.byCategory ?? []);
+	const maxMonthTotal = $derived(
+		monthlyMonths.reduce((max, entry) => Math.max(max, entry.total), 0)
+	);
+
 	function lastDayOfMonth(month: string) {
 		const [year, monthIndex] = month.split('-').map(Number);
 		const day = new Date(year, monthIndex, 0).getDate();
 		return `${year}-${String(monthIndex).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+	}
+
+	function shiftMonth(month: string, delta: number) {
+		const [year, monthNum] = month.split('-').map(Number);
+		const index = year * 12 + (monthNum - 1) + delta;
+		return `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, '0')}`;
+	}
+
+	function minMonth(a: string, b: string) {
+		return a < b ? a : b;
+	}
+
+	function maxMonth(a: string, b: string) {
+		return a > b ? a : b;
+	}
+
+	function formatMonthShort(month: string) {
+		const [year, monthNum] = month.split('-').map(Number);
+		return new Intl.DateTimeFormat('en-US', { month: 'short' }).format(
+			new Date(year, monthNum - 1, 1)
+		);
+	}
+
+	function formatMonthLong(month: string) {
+		const [year, monthNum] = month.split('-').map(Number);
+		return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(
+			new Date(year, monthNum - 1, 1)
+		);
 	}
 
 	function formatAmount(amount: number) {
@@ -163,6 +209,35 @@
 		return (
 			transaction.userCategory ?? transaction.categoryDetailed ?? transaction.categoryPrimary ?? ''
 		);
+	}
+
+	function slugName(slug: string) {
+		return (
+			categoryNames.get(slug) ??
+			slug
+				.split('-')
+				.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+				.join(' ')
+		);
+	}
+
+	// The normalized (canonical) category to show in the review queue. Amazon rows carry
+	// per-item categories; everything else uses the transaction's resolved slug. Falls back to
+	// the raw provider category when a row hasn't been categorized yet.
+	function displayCategory(transaction: TransactionRow) {
+		if (transaction.amazonItems && transaction.amazonItems.length) {
+			const names = [
+				...new Set(
+					transaction.amazonItems
+						.map((item) => item.category)
+						.filter((slug): slug is string => !!slug)
+						.map(slugName)
+				)
+			];
+			if (names.length) return names.join(', ');
+		}
+		if (transaction.categorySlug) return slugName(transaction.categorySlug);
+		return categoryFor(transaction) || 'Uncategorized';
 	}
 
 	function providerCategoryFor(transaction: {
@@ -417,6 +492,7 @@
 			</p>
 			<p class="hero-nav">
 				<a class="nav-link" href="/recurring">View recurring transactions →</a>
+				<a class="nav-link" href="/categories">Manage categories →</a>
 			</p>
 		</div>
 
@@ -512,11 +588,48 @@
 		</label>
 	</section>
 
+	<section class="trend-section organic-surface" aria-label="Dynamic spending month over month">
+		<div class="section-heading compact">
+			<div>
+				<p class="eyebrow">Dynamic · month over month</p>
+				<h2>Unplanned spending trend</h2>
+			</div>
+			{#if monthlyBreakdown.data}
+				<span class="sync-chip">{formatAmount(monthlyBreakdown.data.grandTotal)} over 12 mo</span>
+			{/if}
+		</div>
+
+		{#if monthlyBreakdown.isLoading && !monthlyBreakdown.data}
+			<div class="empty-state">Loading trend...</div>
+		{:else}
+			<div class="month-row">
+				{#each monthlyMonths as entry (entry.month)}
+					<button
+						type="button"
+						class="month-cell"
+						class:is-active={entry.month === selectedMonth}
+						title={`${formatMonthLong(entry.month)} · ${formatAmount(entry.total)}`}
+						onclick={() => (selectedMonth = entry.month)}
+					>
+						<span class="month-bar-track">
+							<span
+								class="month-bar-fill"
+								style={`height: ${maxMonthTotal > 0 ? Math.max(4, (entry.total / maxMonthTotal) * 100) : 4}%`}
+							></span>
+						</span>
+						<b>{formatAmount(entry.total)}</b>
+						<span class="month-label">{formatMonthShort(entry.month)}</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
+	</section>
+
 	<section class="summary-grid">
 		<div class="organic-card">
 			<span class="metric-label">Dynamic spend</span>
-			<strong>{formatAmount(dynamicTotal)}</strong>
-			<p>{dynamicRows.length} transactions in {selectedMonth}</p>
+			<strong>{formatAmount(dynamicTotalMonthly)}</strong>
+			<p>Unplanned spend in {formatMonthLong(selectedMonth)}</p>
 		</div>
 		<a class="organic-card card-link" href="/recurring">
 			<span class="metric-label">Recurring</span>
@@ -534,28 +647,21 @@
 		<div class="insight-panel organic-surface">
 			<div class="section-heading compact">
 				<div>
-					<p class="eyebrow">Dynamic</p>
+					<p class="eyebrow">Dynamic · {formatMonthShort(selectedMonth)}</p>
 					<h2>By category</h2>
 				</div>
 			</div>
 
 			<div class="bar-list">
-				{#each dynamicByCategory as row (row.label)}
-					<button
-						type="button"
-						class="bar-row"
-						class:is-active={searchTerm === row.label}
-						title={`Filter review queue by ${row.label}`}
-						onclick={() => filterBySearch(row.label)}
-					>
+				{#each canonicalCategoryRows as row (row.slug)}
+					<div class="bar-row static">
 						<div>
-							<strong>{row.label}</strong>
-							<span>{row.count} rows</span>
+							<strong>{row.name}</strong>
 						</div>
 						<b>{formatAmount(row.total)}</b>
-					</button>
+					</div>
 				{:else}
-					<div class="empty-state">No dynamic categories for this month.</div>
+					<div class="empty-state">No categorized dynamic spend for this month.</div>
 				{/each}
 			</div>
 		</div>
@@ -652,7 +758,7 @@
 								</td>
 								<td data-label="Category">
 									<div class="category-stack">
-										<span>{categoryFor(transaction) || 'Uncategorized'}</span>
+										<span>{displayCategory(transaction)}</span>
 										{#if providerCategoryFor(transaction)}
 											<button
 												type="button"
@@ -984,9 +1090,93 @@
 		background: rgb(193 140 93 / 14%);
 	}
 
+	.trend-section {
+		margin: 1rem 0 clamp(2rem, 5vw, 3.5rem);
+		padding: 1.5rem;
+		border-radius: 2rem 3.5rem 2rem 2.75rem;
+	}
+
+	.month-row {
+		display: grid;
+		grid-auto-flow: column;
+		grid-auto-columns: minmax(0, 1fr);
+		gap: 0.4rem;
+		align-items: end;
+		margin-top: 1rem;
+		overflow-x: auto;
+	}
+
+	.month-cell {
+		display: grid;
+		gap: 0.4rem;
+		justify-items: center;
+		min-width: 3.5rem;
+		padding: 0.5rem 0.3rem;
+		font: inherit;
+		color: inherit;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 1rem;
+		cursor: pointer;
+		transition:
+			background-color 200ms ease,
+			border-color 200ms ease;
+	}
+
+	.month-cell:hover {
+		background: rgb(230 220 205 / 45%);
+	}
+
+	.month-cell.is-active {
+		background: rgb(93 112 82 / 12%);
+		border-color: rgb(93 112 82 / 35%);
+	}
+
+	.month-bar-track {
+		display: flex;
+		align-items: end;
+		justify-content: center;
+		width: 100%;
+		height: 5rem;
+	}
+
+	.month-bar-fill {
+		display: block;
+		width: 0.9rem;
+		min-height: 0.25rem;
+		background: var(--color-primary);
+		border-radius: var(--radius-pill);
+		opacity: 0.55;
+	}
+
+	.month-cell.is-active .month-bar-fill {
+		opacity: 1;
+	}
+
+	.month-cell b {
+		font-size: 0.72rem;
+		white-space: nowrap;
+	}
+
+	.month-label {
+		color: var(--color-muted-foreground);
+		font-size: 0.72rem;
+		font-weight: 800;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
 	.bar-list {
 		display: grid;
 		gap: 0.8rem;
+	}
+
+	.bar-row.static {
+		cursor: default;
+	}
+
+	.bar-row.static:hover {
+		background: transparent;
 	}
 
 	.bar-row {

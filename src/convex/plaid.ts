@@ -116,6 +116,7 @@ export const listRecentTransactions = query({
 				categoryPrimary: transaction.categoryPrimary ?? null,
 				categoryDetailed: transaction.categoryDetailed ?? null,
 				userCategory: transaction.userCategory ?? null,
+				categorySlug: transaction.categorySlug ?? null,
 				classification: transaction.classification,
 				classificationSource: transaction.classificationSource,
 				source: transaction.source,
@@ -165,6 +166,7 @@ async function amazonItemsForTransaction(
 		quantity: number | null;
 		amount: number | null;
 		asin: string | null;
+		category: string | null;
 	}> = [];
 
 	for (const order of orders) {
@@ -177,7 +179,8 @@ async function amazonItemsForTransaction(
 				title: item.title,
 				quantity: item.quantity ?? null,
 				amount: item.amount ?? null,
-				asin: item.asin ?? null
+				asin: item.asin ?? null,
+				category: item.category ?? null
 			});
 		}
 	}
@@ -241,6 +244,95 @@ export const getDynamicDashboard = query({
 					transaction.categoryPrimary ??
 					'Uncategorized'
 			}))
+		};
+	}
+});
+
+// Month-over-month dynamic spend, broken into canonical categories. Amazon charges are
+// exploded into their line items so item categories (not the generic "Amazon" bucket) show up.
+export const getMonthlyDynamicBreakdown = query({
+	args: {
+		startMonth: v.string(),
+		endMonth: v.string()
+	},
+	handler: async (ctx, args) => {
+		const startDate = `${args.startMonth}-01`;
+		const endDate = lastDayOfMonth(args.endMonth);
+
+		const dynamicRows = await ctx.db
+			.query('transactions')
+			.withIndex('by_classification_and_date', (q) =>
+				q.eq('classification', 'dynamic').gte('date', startDate).lte('date', endDate)
+			)
+			.take(2000);
+		const unreviewedRows = await ctx.db
+			.query('transactions')
+			.withIndex('by_classification_and_date', (q) =>
+				q.eq('classification', 'unreviewed').gte('date', startDate).lte('date', endDate)
+			)
+			.take(2000);
+		const rows = [...dynamicRows, ...unreviewedRows].filter(
+			(transaction) => !transaction.removed && transaction.kind === 'expense'
+		);
+
+		const categories = await ctx.db
+			.query('categories')
+			.withIndex('by_active', (q) => q.eq('active', true))
+			.take(200);
+		const categoryName = new Map(categories.map((category) => [category.slug, category.name]));
+		const nameFor = (slug: string) => categoryName.get(slug) ?? titleCase(slug);
+
+		// month -> slug -> total
+		const byMonth = new Map<string, Map<string, number>>();
+		const totalsByCategory = new Map<string, number>();
+		const monthTotals = new Map<string, number>();
+
+		const add = (month: string, slug: string, amount: number) => {
+			if (amount <= 0) return;
+			const monthMap = byMonth.get(month) ?? new Map<string, number>();
+			monthMap.set(slug, (monthMap.get(slug) ?? 0) + amount);
+			byMonth.set(month, monthMap);
+			totalsByCategory.set(slug, (totalsByCategory.get(slug) ?? 0) + amount);
+			monthTotals.set(month, (monthTotals.get(month) ?? 0) + amount);
+		};
+
+		for (const transaction of rows) {
+			const month = transaction.date.slice(0, 7);
+
+			if (transaction.normalizedMerchant.includes('amazon')) {
+				const items = await amazonItemsForTransaction(ctx, transaction);
+				if (items.length > 0) {
+					const amountSum = items.reduce((sum, item) => sum + (item.amount ?? 0), 0);
+					for (const item of items) {
+						const slug = item.category ?? 'uncategorized';
+						// Split the charge across items by item price; fall back to an even split.
+						const share =
+							amountSum > 0
+								? transaction.amount * ((item.amount ?? 0) / amountSum)
+								: transaction.amount / items.length;
+						add(month, slug, share);
+					}
+					continue;
+				}
+			}
+
+			add(month, transaction.categorySlug ?? 'uncategorized', transaction.amount);
+		}
+
+		const months = enumerateMonths(args.startMonth, args.endMonth).map((month) => {
+			const monthMap = byMonth.get(month) ?? new Map<string, number>();
+			const byCategory = [...monthMap.entries()]
+				.map(([slug, total]) => ({ slug, name: nameFor(slug), total }))
+				.sort((a, b) => b.total - a.total);
+			return { month, total: monthTotals.get(month) ?? 0, byCategory };
+		});
+
+		return {
+			months,
+			totalsByCategory: [...totalsByCategory.entries()]
+				.map(([slug, total]) => ({ slug, name: nameFor(slug), total }))
+				.sort((a, b) => b.total - a.total),
+			grandTotal: [...monthTotals.values()].reduce((sum, total) => sum + total, 0)
 		};
 	}
 });
@@ -910,9 +1002,19 @@ async function upsertTransaction(
 			transaction.categoryDetailed,
 			transaction.categoryPrimary
 		);
+		// Inherit a previously-resolved AI category for this merchant so re-syncs don't re-hit the AI.
+		const cachedCategory = await ctx.db
+			.query('merchantCategories')
+			.withIndex('by_normalizedMerchant', (q) =>
+				q.eq('normalizedMerchant', transaction.normalizedMerchant)
+			)
+			.unique();
 		transactionDocId = await ctx.db.insert('transactions', {
 			...baseDoc,
 			...classification,
+			...(cachedCategory
+				? { categorySlug: cachedCategory.categorySlug, categorySource: 'ai' as const }
+				: {}),
 			importedAt: now
 		});
 	}
@@ -1079,4 +1181,34 @@ function summarizeBy<T>(rows: T[], keyFor: (row: T) => string) {
 function normalizeOptionalText(value?: string) {
 	const normalized = value?.trim();
 	return normalized ? normalized : undefined;
+}
+
+function lastDayOfMonth(month: string) {
+	const [year, monthIndex] = month.split('-').map(Number);
+	const day = new Date(Date.UTC(year, monthIndex, 0)).getUTCDate();
+	return `${month}-${String(day).padStart(2, '0')}`;
+}
+
+// Inclusive list of YYYY-MM strings from start to end (capped to avoid runaway ranges).
+function enumerateMonths(startMonth: string, endMonth: string) {
+	const months: string[] = [];
+	let [year, month] = startMonth.split('-').map(Number);
+	const [endYear, endMonthNum] = endMonth.split('-').map(Number);
+	for (let guard = 0; guard < 240; guard++) {
+		if (year > endYear || (year === endYear && month > endMonthNum)) break;
+		months.push(`${year}-${String(month).padStart(2, '0')}`);
+		month += 1;
+		if (month > 12) {
+			month = 1;
+			year += 1;
+		}
+	}
+	return months;
+}
+
+function titleCase(slug: string) {
+	return slug
+		.split('-')
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(' ');
 }

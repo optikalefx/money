@@ -8,6 +8,8 @@
  * @module
  */
 
+import type * as aiActions from "../aiActions.js";
+import type * as categories from "../categories.js";
 import type * as gmail from "../gmail.js";
 import type * as gmailActions from "../gmailActions.js";
 import type * as http from "../http.js";
@@ -21,6 +23,8 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  aiActions: typeof aiActions;
+  categories: typeof categories;
   gmail: typeof gmail;
   gmailActions: typeof gmailActions;
   http: typeof http;
