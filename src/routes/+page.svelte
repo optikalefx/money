@@ -3,6 +3,7 @@
 	import { api } from '../convex/_generated/api.js';
 	import type { Id } from '../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
+	import ActionsMenu from '$lib/ActionsMenu.svelte';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic' | 'unreviewed';
 	type MerchantClassification = 'known_recurring' | 'expected';
@@ -847,26 +848,6 @@
 								<td data-label="Category">
 									<div class="category-stack">
 										<span>{displayCategory(transaction)}</span>
-										{#if providerCategoryFor(transaction) && displayCategory(transaction) !== 'Uncategorized'}
-											<button
-												type="button"
-												class="text-action"
-												title="Treat this provider category as expected"
-												disabled={markingTransactionId === transaction.id}
-												onclick={() => markExpectedCategory(transaction)}
-											>
-												Expected category
-											</button>
-											<button
-												type="button"
-												class="text-action transfer-action"
-												title="Ignore this provider category as a transfer"
-												disabled={markingTransactionId === transaction.id}
-												onclick={() => markTransferCategory(transaction)}
-											>
-												Ignore transfer
-											</button>
-										{/if}
 									</div>
 								</td>
 								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
@@ -881,14 +862,14 @@
 										>
 											Recurring merchant
 										</button>
-										<button
-											type="button"
-											title="Treat this merchant as expected"
+										<ActionsMenu
 											disabled={markingTransactionId === transaction.id}
-											onclick={() => markTransaction(transaction, 'expected')}
-										>
-											Expected merchant
-										</button>
+											showCategoryActions={Boolean(providerCategoryFor(transaction)) &&
+												displayCategory(transaction) !== 'Uncategorized'}
+											onExpectedMerchant={() => markTransaction(transaction, 'expected')}
+											onExpectedCategory={() => markExpectedCategory(transaction)}
+											onIgnoreTransfer={() => markTransferCategory(transaction)}
+										/>
 									</div>
 								</td>
 							</tr>

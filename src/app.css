@@ -291,6 +291,18 @@ canvas {
 		0 0 0 6px rgb(253 252 248 / 85%);
 }
 
+.tippy-box[data-theme~='actions-menu'] {
+	color: var(--color-accent-foreground);
+	background: var(--color-surface);
+	border: 1px solid rgb(222 216 207 / 85%);
+	border-radius: var(--radius-sm);
+	box-shadow: var(--shadow-float);
+}
+
+.tippy-box[data-theme~='actions-menu'] .tippy-content {
+	padding: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
 	*,
 	*::before,

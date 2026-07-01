@@ -15,14 +15,14 @@ integrations (all optional — the app runs without them, you just won't have an
 
 - **Node.js 20+** and **npm**.
 - A free **[Convex](https://convex.dev)** account (backend + database).
-- A **[Plaid](https://plaid.com)** account for bank sync (free Sandbox tier is fine to start).
-- A **Google Cloud** account for the Gmail/Amazon integration (optional).
-- An **[OpenAI](https://platform.openai.com)** API key for AI transaction classification (optional).
+- A free **[Plaid](https://plaid.com)** account for bank sync.
+- A free **Google Cloud** account for the Gmail/Amazon integration (optional).
+- An **[OpenAI](https://platform.openai.com)** API key for AI transaction classification (optional). (Or Anthropic)
 
 ### 2. Clone and install
 
 ```sh
-git clone <this-repo-url> money
+git clone git@github.com:optikalefx/money.git
 cd money
 npm install
 ```
