@@ -8,13 +8,19 @@
  * @module
  */
 
+import type * as plaid from "../plaid.js";
+import type * as plaidActions from "../plaidActions.js";
+
 import type {
   ApiFromModules,
   FilterApi,
   FunctionReference,
 } from "convex/server";
 
-declare const fullApi: ApiFromModules<{}>;
+declare const fullApi: ApiFromModules<{
+  plaid: typeof plaid;
+  plaidActions: typeof plaidActions;
+}>;
 
 /**
  * A utility for referencing Convex functions in your app's public API.

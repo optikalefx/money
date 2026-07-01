@@ -33,6 +33,7 @@
 	},
 	"dependencies": {
 		"convex": "^1.42.1",
-		"convex-svelte": "^0.14.0"
+		"convex-svelte": "^0.14.0",
+		"plaid": "^43.0.0"
 	}
 }
