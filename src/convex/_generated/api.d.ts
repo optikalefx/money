@@ -8,6 +8,9 @@
  * @module
  */
 
+import type * as adapters_amazon from "../adapters/amazon.js";
+import type * as adapters_index from "../adapters/index.js";
+import type * as adapters_types from "../adapters/types.js";
 import type * as aiActions from "../aiActions.js";
 import type * as categories from "../categories.js";
 import type * as gmail from "../gmail.js";
@@ -25,6 +28,9 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  "adapters/amazon": typeof adapters_amazon;
+  "adapters/index": typeof adapters_index;
+  "adapters/types": typeof adapters_types;
   aiActions: typeof aiActions;
   categories: typeof categories;
   gmail: typeof gmail;
