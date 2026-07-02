@@ -11,7 +11,7 @@ import {
 } from 'plaid';
 import { v } from 'convex/values';
 import { action, env, type ActionCtx } from './_generated/server';
-import { internal } from './_generated/api';
+import { api, internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 
 type PlaidEnvironment = 'sandbox' | 'development' | 'production';
@@ -162,6 +162,15 @@ export const syncAllItems = action({
 		for (const item of items) {
 			const result = await syncItem(ctx, item);
 			results.push(result);
+		}
+
+		// Newly imported/changed transactions land in Uncategorized until the AI categorizer runs.
+		// Chain it here so a sync (from the UI button, a cron, or a manual run) always categorizes
+		// new merchants — it only calls the model for merchants not already cached, so a no-op sync
+		// is cheap. Scheduled (not awaited) so the sync result returns promptly.
+		const changed = results.reduce((sum, result) => sum + result.added + result.modified, 0);
+		if (changed > 0) {
+			await ctx.scheduler.runAfter(0, api.aiActions.categorizeTransactions, {});
 		}
 
 		return results;

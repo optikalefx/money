@@ -2,7 +2,7 @@
 
 import { v } from 'convex/values';
 import { action, env } from './_generated/server';
-import { internal } from './_generated/api';
+import { api, internal } from './_generated/api';
 import { generateObject } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -53,6 +53,12 @@ export const categorizeTransactions = action({
 		itemUnits: number;
 		chunks: number;
 	}> => {
+		// Guarantee the canonical taxonomy exists before we ask the model to assign to it. Otherwise
+		// (e.g. right after a data reset, or before the Categories page has ever been opened) there
+		// are no valid slugs and every unit clamps to `uncategorized`. Idempotent — a no-op once
+		// categories exist.
+		await ctx.runMutation(api.categories.ensureDefaultCategories, {});
+
 		const input = await ctx.runQuery(internal.categories.getCategorizationInput, {
 			force: args.force ?? false
 		});
