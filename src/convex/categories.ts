@@ -84,6 +84,7 @@ export const listCategories = query({
 				slug: row.slug,
 				name: row.name,
 				description: row.description ?? '',
+				treatment: row.treatment ?? null,
 				isDefault: row.isDefault,
 				sortOrder: row.sortOrder
 			}));
@@ -359,6 +360,85 @@ export const saveCategoryAssignments = internalMutation({
 	}
 });
 
+// A canonical category's `treatment` decides how its transactions are classified. Category
+// treatment outranks the default but yields to manual marks and merchant rules, so we only ever
+// (re)stamp transactions whose classification came from the default or a prior category treatment.
+export type CategoryTreatment = 'expected' | 'transfer' | null | undefined;
+
+const CATEGORY_OWNED_SOURCES = new Set(['default', 'category_rule']);
+
+// The classification/kind a category treatment implies. `null` treatment resets to plain dynamic.
+export function treatmentPatch(treatment: CategoryTreatment): {
+	classification: 'expected' | 'dynamic';
+	classificationSource: 'category_rule' | 'default';
+	classificationConfidence: number | undefined;
+	kind: 'expense' | 'transfer';
+} {
+	if (treatment === 'expected') {
+		return {
+			classification: 'expected',
+			classificationSource: 'category_rule',
+			classificationConfidence: 0.9,
+			kind: 'expense'
+		};
+	}
+	if (treatment === 'transfer') {
+		return {
+			classification: 'dynamic',
+			classificationSource: 'category_rule',
+			classificationConfidence: 0.9,
+			kind: 'transfer'
+		};
+	}
+	return {
+		classification: 'dynamic',
+		classificationSource: 'default',
+		classificationConfidence: undefined,
+		kind: 'expense'
+	};
+}
+
+// Re-stamp every category-owned transaction sharing this slug to match the category's treatment.
+// Returns how many transactions changed.
+export async function reclassifyCategoryTransactions(
+	ctx: MutationCtx,
+	slug: string,
+	treatment: CategoryTreatment
+) {
+	const now = Date.now();
+	const patch = treatmentPatch(treatment);
+	const transactions = await ctx.db
+		.query('transactions')
+		.withIndex('by_categorySlug', (q) => q.eq('categorySlug', slug))
+		.take(1000);
+	let updated = 0;
+	for (const transaction of transactions) {
+		if (transaction.removed) continue;
+		if (!CATEGORY_OWNED_SOURCES.has(transaction.classificationSource)) continue;
+		await ctx.db.patch(transaction._id, { ...patch, reviewedAt: now, updatedAt: now });
+		updated += 1;
+	}
+	return updated;
+}
+
+// Set (or clear with `null`) a canonical category's treatment and reclassify its transactions.
+export const setCategoryTreatment = mutation({
+	args: {
+		id: v.id('categories'),
+		treatment: v.union(v.literal('expected'), v.literal('transfer'), v.null())
+	},
+	handler: async (ctx, args) => {
+		const category = await ctx.db.get(args.id);
+		if (!category) throw new Error('Category not found.');
+		await ctx.db.patch(args.id, {
+			treatment: args.treatment ?? undefined,
+			updatedAt: Date.now()
+		});
+		const updated = await reclassifyCategoryTransactions(ctx, category.slug, args.treatment);
+		return { ok: true, slug: category.slug, treatment: args.treatment, updated };
+	}
+});
+
 // Upsert the per-merchant category cache and fan the slug out to that merchant's transactions.
 async function applyMerchantCategory(
 	ctx: MutationCtx,
@@ -385,6 +465,14 @@ async function applyMerchantCategory(
 		await ctx.db.insert('merchantCategories', { ...doc, createdAt: now });
 	}
 
+	// Carry the destination category's treatment onto the transactions we're categorizing, so
+	// expected/transfer categories classify their transactions the moment they get their slug.
+	const category = await ctx.db
+		.query('categories')
+		.withIndex('by_slug', (q) => q.eq('slug', categorySlug))
+		.unique();
+	const treatment = category?.treatment ?? null;
+
 	const transactions = await ctx.db
 		.query('transactions')
 		.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
@@ -392,7 +480,17 @@ async function applyMerchantCategory(
 	let applied = 0;
 	for (const transaction of transactions) {
 		if (transaction.removed || transaction.categorySource === 'manual') continue;
-		await ctx.db.patch(transaction._id, { categorySlug, categorySource: 'ai', updatedAt: now });
+		// Only category-owned classifications follow the treatment; manual/merchant marks win.
+		const classificationPatch =
+			treatment && CATEGORY_OWNED_SOURCES.has(transaction.classificationSource)
+				? { ...treatmentPatch(treatment), reviewedAt: now }
+				: {};
+		await ctx.db.patch(transaction._id, {
+			categorySlug,
+			categorySource: 'ai',
+			...classificationPatch,
+			updatedAt: now
+		});
 		applied += 1;
 	}
 	return applied;

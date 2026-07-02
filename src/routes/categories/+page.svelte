@@ -5,11 +5,13 @@
 	import type { Id } from '../../convex/_generated/dataModel.js';
 	import SuggestionTransactions from '$lib/SuggestionTransactions.svelte';
 
+	type CategoryTreatment = 'expected' | 'transfer' | null;
 	type CategoryRow = {
 		id: Id<'categories'>;
 		slug: string;
 		name: string;
 		description: string;
+		treatment: CategoryTreatment;
 		isDefault: boolean;
 		sortOrder: number;
 	};
@@ -19,6 +21,7 @@
 	const ensureDefaults = useMutation(api.categories.ensureDefaultCategories);
 	const upsertCategory = useMutation(api.categories.upsertCategory);
 	const deleteCategory = useMutation(api.categories.deleteCategory);
+	const setCategoryTreatment = useMutation(api.categories.setCategoryTreatment);
 	const setAiConfig = useMutation(api.categories.setAiConfig);
 	const categorize = useAction(api.aiActions.categorizeTransactions);
 	const suggestions = useQuery(api.categories.listCategorySuggestions, () => ({}));
@@ -101,6 +104,19 @@
 			newDescription = '';
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to add category.';
+		}
+	}
+
+	async function changeTreatment(row: CategoryRow, treatment: CategoryTreatment) {
+		errorMessage = '';
+		try {
+			const result = await setCategoryTreatment({ id: row.id, treatment });
+			const label = treatment ?? 'dynamic';
+			statusMessage = `${row.name} is now ${label} (${result.updated} transaction${
+				result.updated === 1 ? '' : 's'
+			} reclassified).`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to update treatment.';
 		}
 	}
 
@@ -394,6 +410,25 @@
 									oninput={(event) => updateDraft(row, { description: event.currentTarget.value })}
 									placeholder="Optional"></textarea>
 							</label>
+							{#if row.slug !== 'uncategorized'}
+								<label class="treatment-field">
+									<span>Treatment</span>
+									<select
+										value={row.treatment ?? 'dynamic'}
+										onchange={(event) =>
+											changeTreatment(
+												row,
+												event.currentTarget.value === 'dynamic'
+													? null
+													: (event.currentTarget.value as CategoryTreatment)
+											)}
+									>
+										<option value="dynamic">Dynamic</option>
+										<option value="expected">Expected</option>
+										<option value="transfer">Transfer (ignore)</option>
+									</select>
+								</label>
+							{/if}
 						</div>
 						<div class="card-actions">
 							<button

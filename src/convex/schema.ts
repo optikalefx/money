@@ -107,7 +107,8 @@ export default defineSchema({
 		.index('by_accountId_and_date', ['accountId', 'date'])
 		.index('by_normalizedMerchant', ['normalizedMerchant'])
 		.index('by_categoryDetailed', ['categoryDetailed'])
-		.index('by_categoryPrimary', ['categoryPrimary']),
+		.index('by_categoryPrimary', ['categoryPrimary'])
+		.index('by_categorySlug', ['categorySlug']),
 
 	transactionSources: defineTable({
 		source: transactionSource,
@@ -137,18 +138,6 @@ export default defineSchema({
 	})
 		.index('by_active', ['active'])
 		.index('by_normalizedPattern', ['normalizedPattern']),
-
-	categoryRules: defineTable({
-		providerCategory: v.string(),
-		classification: v.union(v.literal('expected'), v.literal('dynamic')),
-		kind: v.optional(transactionKind),
-		category: v.string(),
-		active: v.boolean(),
-		createdAt: v.number(),
-		updatedAt: v.number()
-	})
-		.index('by_active', ['active'])
-		.index('by_providerCategory', ['providerCategory']),
 
 	gmailAccounts: defineTable({
 		email: v.optional(v.string()),
@@ -238,6 +227,10 @@ export default defineSchema({
 		description: v.optional(v.string()),
 		color: v.optional(v.string()),
 		sortOrder: v.number(),
+		// How transactions in this canonical category should be classified. Absent = the default
+		// (dynamic). `expected` treats them as expected spend; `transfer` ignores them as transfers.
+		// This is the canonical, AI-taxonomy-driven replacement for the old Plaid `categoryRules`.
+		treatment: v.optional(v.union(v.literal('expected'), v.literal('transfer'))),
 		active: v.boolean(),
 		isDefault: v.boolean(),
 		createdAt: v.number(),

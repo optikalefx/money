@@ -8,6 +8,7 @@ import {
 	type QueryCtx
 } from './_generated/server';
 import type { Id } from './_generated/dataModel';
+import { reclassifyCategoryTransactions, treatmentPatch } from './categories';
 
 const transactionClassification = v.union(
 	v.literal('known_recurring'),
@@ -531,6 +532,184 @@ export const unmarkRecurring = mutation({
 	}
 });
 
+// Expected things come in two flavors: merchants (merchantRules marked `expected`) and canonical
+// categories (categories with `treatment: 'expected'`). This summary lists each alongside its
+// transaction totals so they can be reviewed and unmarked on the Expected page.
+export const getExpectedSummary = query({
+	args: {},
+	handler: async (ctx) => {
+		const merchantRules = await ctx.db
+			.query('merchantRules')
+			.withIndex('by_active', (q) => q.eq('active', true))
+			.take(500);
+		const byMerchant = [];
+		for (const rule of merchantRules) {
+			if (rule.classification !== 'expected') continue;
+			const rows = await ctx.db
+				.query('transactions')
+				.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', rule.normalizedPattern))
+				.take(500);
+			const expenses = rows.filter(
+				(transaction) =>
+					!transaction.removed &&
+					transaction.classification === 'expected' &&
+					transaction.kind === 'expense'
+			);
+			const total = expenses.reduce((sum, transaction) => sum + transaction.amount, 0);
+			const months = new Set(expenses.map((transaction) => transaction.date.slice(0, 7)));
+			byMerchant.push({
+				key: rule.normalizedPattern,
+				normalizedMerchant: rule.normalizedPattern,
+				label: rule.pattern,
+				category: rule.category ?? null,
+				total,
+				count: expenses.length,
+				monthly: total / Math.max(months.size, 1)
+			});
+		}
+		byMerchant.sort((a, b) => b.total - a.total);
+
+		const categories = await ctx.db
+			.query('categories')
+			.withIndex('by_active', (q) => q.eq('active', true))
+			.take(200);
+		const byCategory = [];
+		for (const category of categories) {
+			if (category.treatment !== 'expected') continue;
+			const rows = await ctx.db
+				.query('transactions')
+				.withIndex('by_categorySlug', (q) => q.eq('categorySlug', category.slug))
+				.take(1000);
+			const expenses = rows.filter(
+				(transaction) =>
+					!transaction.removed &&
+					transaction.classification === 'expected' &&
+					transaction.kind === 'expense'
+			);
+			const total = expenses.reduce((sum, transaction) => sum + transaction.amount, 0);
+			const months = new Set(expenses.map((transaction) => transaction.date.slice(0, 7)));
+			byCategory.push({
+				key: category.slug,
+				slug: category.slug,
+				categoryId: category._id,
+				label: category.name,
+				total,
+				count: expenses.length,
+				monthly: total / Math.max(months.size, 1)
+			});
+		}
+		byCategory.sort((a, b) => b.total - a.total);
+
+		const monthlyTotal =
+			byMerchant.reduce((sum, row) => sum + row.monthly, 0) +
+			byCategory.reduce((sum, row) => sum + row.monthly, 0);
+		const total =
+			byMerchant.reduce((sum, row) => sum + row.total, 0) +
+			byCategory.reduce((sum, row) => sum + row.total, 0);
+		const count =
+			byMerchant.reduce((sum, row) => sum + row.count, 0) +
+			byCategory.reduce((sum, row) => sum + row.count, 0);
+
+		return {
+			total,
+			monthlyTotal,
+			count,
+			merchantCount: byMerchant.length,
+			categoryCount: byCategory.length,
+			byMerchant,
+			byCategory
+		};
+	}
+});
+
+export const getExpectedTransactions = query({
+	args: {
+		startDate: v.optional(v.string()),
+		endDate: v.optional(v.string())
+	},
+	handler: async (ctx, args) => {
+		const rows = await ctx.db
+			.query('transactions')
+			.withIndex('by_classification_and_date', (q) => {
+				const withClass = q.eq('classification', 'expected');
+				if (args.startDate && args.endDate) {
+					return withClass.gte('date', args.startDate).lte('date', args.endDate);
+				}
+				if (args.startDate) return withClass.gte('date', args.startDate);
+				if (args.endDate) return withClass.lte('date', args.endDate);
+				return withClass;
+			})
+			.order('desc')
+			.take(500);
+
+		return Promise.all(
+			rows
+				.filter((transaction) => !transaction.removed)
+				.map(async (transaction) => ({
+					id: transaction._id,
+					date: transaction.date,
+					name: transaction.name,
+					merchantName: transaction.merchantName ?? null,
+					amount: transaction.amount,
+					kind: transaction.kind,
+					pending: transaction.pending,
+					categoryPrimary: transaction.categoryPrimary ?? null,
+					categoryDetailed: transaction.categoryDetailed ?? null,
+					userCategory: transaction.userCategory ?? null,
+					classificationSource: transaction.classificationSource,
+					source: transaction.source,
+					amazonItems: await amazonItemsForTransaction(ctx, transaction)
+				}))
+		);
+	}
+});
+
+export const unmarkExpectedMerchant = mutation({
+	args: {
+		normalizedMerchant: v.string()
+	},
+	handler: async (ctx, args) => {
+		const now = Date.now();
+		const rules = await ctx.db
+			.query('merchantRules')
+			.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', args.normalizedMerchant))
+			.take(10);
+
+		for (const rule of rules) {
+			if (rule.classification === 'expected') {
+				await ctx.db.delete(rule._id);
+			}
+		}
+
+		const matchingTransactions = await ctx.db
+			.query('transactions')
+			.withIndex('by_normalizedMerchant', (q) =>
+				q.eq('normalizedMerchant', args.normalizedMerchant)
+			)
+			.take(500);
+		let updated = 0;
+
+		for (const matchingTransaction of matchingTransactions) {
+			if (matchingTransaction.removed) continue;
+			if (matchingTransaction.classification !== 'expected') continue;
+
+			await ctx.db.patch(matchingTransaction._id, {
+				classification: 'dynamic',
+				classificationSource: 'default',
+				classificationConfidence: undefined,
+				reviewedAt: now,
+				updatedAt: now
+			});
+			updated += 1;
+		}
+
+		return { ok: true, merchant: args.normalizedMerchant, updated };
+	}
+});
+
+// Unmarking an expected category is just clearing its treatment — see
+// `categories.setCategoryTreatment`, which the Expected page calls with `treatment: null`.
+
 export const markTransaction = mutation({
 	args: {
 		transactionId: v.id('transactions'),
@@ -601,154 +780,46 @@ export const markTransaction = mutation({
 	}
 });
 
-export const markCategoryExpected = mutation({
-	args: {
-		transactionId: v.id('transactions')
-	},
-	handler: async (ctx, args) => {
-		const now = Date.now();
-		const transaction = await ctx.db.get(args.transactionId);
+// Set a treatment on the canonical (AI) category that a transaction belongs to, then reclassify
+// every transaction in that category. Keyed on `categorySlug`, never the Plaid provider category.
+async function markCategoryTreatment(
+	ctx: MutationCtx,
+	transactionId: Id<'transactions'>,
+	treatment: 'expected' | 'transfer'
+) {
+	const transaction = await ctx.db.get(transactionId);
 
-		if (!transaction || transaction.removed) {
-			throw new Error('Transaction is not available for marking.');
-		}
-
-		const providerCategory = transaction.categoryDetailed ?? transaction.categoryPrimary;
-
-		if (!providerCategory) {
-			throw new Error('This transaction does not have a provider category to mark as expected.');
-		}
-
-		const category = transaction.userCategory ?? providerCategory;
-		const existingRule = (
-			await ctx.db
-				.query('categoryRules')
-				.withIndex('by_providerCategory', (q) => q.eq('providerCategory', providerCategory))
-				.take(1)
-		)[0];
-		const ruleDoc = {
-			providerCategory,
-			classification: 'expected' as const,
-			kind: 'expense' as const,
-			category,
-			active: true,
-			updatedAt: now
-		};
-
-		if (existingRule) {
-			await ctx.db.patch(existingRule._id, ruleDoc);
-		} else {
-			await ctx.db.insert('categoryRules', {
-				...ruleDoc,
-				createdAt: now
-			});
-		}
-
-		const matchingTransactions = transaction.categoryDetailed
-			? await ctx.db
-					.query('transactions')
-					.withIndex('by_categoryDetailed', (q) =>
-						q.eq('categoryDetailed', transaction.categoryDetailed)
-					)
-					.take(200)
-			: await ctx.db
-					.query('transactions')
-					.withIndex('by_categoryPrimary', (q) => q.eq('categoryPrimary', providerCategory))
-					.take(200);
-		let updated = 0;
-
-		for (const matchingTransaction of matchingTransactions) {
-			if (matchingTransaction.removed) continue;
-
-			await ctx.db.patch(matchingTransaction._id, {
-				kind: 'expense',
-				classification: 'expected',
-				classificationSource: 'category_rule',
-				classificationConfidence: 1,
-				userCategory: category,
-				reviewedAt: now,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
-		return { ok: true, category: providerCategory, updated };
+	if (!transaction || transaction.removed) {
+		throw new Error('Transaction is not available for marking.');
 	}
+
+	const slug = transaction.categorySlug;
+	if (!slug) {
+		throw new Error('Categorize this transaction first, then mark its category.');
+	}
+
+	const category = await ctx.db
+		.query('categories')
+		.withIndex('by_slug', (q) => q.eq('slug', slug))
+		.unique();
+	if (!category) {
+		throw new Error("This transaction's category no longer exists.");
+	}
+
+	await ctx.db.patch(category._id, { treatment, updatedAt: Date.now() });
+	const updated = await reclassifyCategoryTransactions(ctx, slug, treatment);
+
+	return { ok: true as const, category: category.name, slug, updated };
+}
+
+export const markCategoryExpected = mutation({
+	args: { transactionId: v.id('transactions') },
+	handler: (ctx, args) => markCategoryTreatment(ctx, args.transactionId, 'expected')
 });
 
 export const markCategoryTransfer = mutation({
-	args: {
-		transactionId: v.id('transactions')
-	},
-	handler: async (ctx, args) => {
-		const now = Date.now();
-		const transaction = await ctx.db.get(args.transactionId);
-
-		if (!transaction || transaction.removed) {
-			throw new Error('Transaction is not available for marking.');
-		}
-
-		const providerCategory = transaction.categoryDetailed ?? transaction.categoryPrimary;
-
-		if (!providerCategory) {
-			throw new Error('This transaction does not have a provider category to ignore.');
-		}
-
-		const category = transaction.userCategory ?? providerCategory;
-		const existingRule = (
-			await ctx.db
-				.query('categoryRules')
-				.withIndex('by_providerCategory', (q) => q.eq('providerCategory', providerCategory))
-				.take(1)
-		)[0];
-		const ruleDoc = {
-			providerCategory,
-			classification: 'dynamic' as const,
-			kind: 'transfer' as const,
-			category,
-			active: true,
-			updatedAt: now
-		};
-
-		if (existingRule) {
-			await ctx.db.patch(existingRule._id, ruleDoc);
-		} else {
-			await ctx.db.insert('categoryRules', {
-				...ruleDoc,
-				createdAt: now
-			});
-		}
-
-		const matchingTransactions = transaction.categoryDetailed
-			? await ctx.db
-					.query('transactions')
-					.withIndex('by_categoryDetailed', (q) =>
-						q.eq('categoryDetailed', transaction.categoryDetailed)
-					)
-					.take(200)
-			: await ctx.db
-					.query('transactions')
-					.withIndex('by_categoryPrimary', (q) => q.eq('categoryPrimary', providerCategory))
-					.take(200);
-		let updated = 0;
-
-		for (const matchingTransaction of matchingTransactions) {
-			if (matchingTransaction.removed) continue;
-
-			await ctx.db.patch(matchingTransaction._id, {
-				kind: 'transfer',
-				classification: 'dynamic',
-				classificationSource: 'category_rule',
-				classificationConfidence: 1,
-				userCategory: category,
-				reviewedAt: now,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
-		return { ok: true, category: providerCategory, updated };
-	}
+	args: { transactionId: v.id('transactions') },
+	handler: (ctx, args) => markCategoryTreatment(ctx, args.transactionId, 'transfer')
 });
 
 export const listRules = query({
@@ -756,10 +827,6 @@ export const listRules = query({
 	handler: async (ctx) => {
 		const merchantRules = await ctx.db
 			.query('merchantRules')
-			.withIndex('by_active', (q) => q.eq('active', true))
-			.take(100);
-		const categoryRules = await ctx.db
-			.query('categoryRules')
 			.withIndex('by_active', (q) => q.eq('active', true))
 			.take(100);
 
@@ -770,13 +837,6 @@ export const listRules = query({
 				matchType: rule.matchType,
 				classification: rule.classification,
 				category: rule.category ?? null
-			})),
-			categoryRules: categoryRules.map((rule) => ({
-				id: rule._id,
-				providerCategory: rule.providerCategory,
-				classification: rule.classification,
-				kind: rule.kind ?? null,
-				category: rule.category
 			}))
 		};
 	}
@@ -1018,12 +1078,7 @@ async function upsertTransaction(
 		await ctx.db.patch(existing._id, preservedDoc);
 		transactionDocId = existing._id;
 	} else {
-		const classification = await classifyFromRules(
-			ctx,
-			transaction.normalizedMerchant,
-			transaction.categoryDetailed,
-			transaction.categoryPrimary
-		);
+		const classification = await classifyFromRules(ctx, transaction.normalizedMerchant);
 		// Inherit a previously-resolved AI category for this merchant so re-syncs don't re-hit the AI.
 		const cachedCategory = await ctx.db
 			.query('merchantCategories')
@@ -1031,12 +1086,25 @@ async function upsertTransaction(
 				q.eq('normalizedMerchant', transaction.normalizedMerchant)
 			)
 			.unique();
+		// When inheriting a cached category, let that category's treatment classify the transaction —
+		// unless a merchant rule already claimed it (merchant rules outrank category treatment).
+		let categoryClassification = {};
+		if (cachedCategory && classification.classificationSource === 'default') {
+			const category = await ctx.db
+				.query('categories')
+				.withIndex('by_slug', (q) => q.eq('slug', cachedCategory.categorySlug))
+				.unique();
+			if (category?.treatment) {
+				categoryClassification = treatmentPatch(category.treatment);
+			}
+		}
 		transactionDocId = await ctx.db.insert('transactions', {
 			...baseDoc,
 			...classification,
 			...(cachedCategory
 				? { categorySlug: cachedCategory.categorySlug, categorySource: 'ai' as const }
 				: {}),
+			...categoryClassification,
 			importedAt: now
 		});
 	}
@@ -1125,12 +1193,10 @@ async function readTransactions(
 		.slice(0, args.limit);
 }
 
-async function classifyFromRules(
-	ctx: MutationCtx,
-	normalizedMerchant: string,
-	categoryDetailed?: string,
-	categoryPrimary?: string
-) {
+// Sync-time classification from merchant rules only. Category-driven classification (expected /
+// transfer) is applied later, keyed on the canonical AI category once the transaction is
+// categorized — never on the Plaid provider category.
+async function classifyFromRules(ctx: MutationCtx, normalizedMerchant: string) {
 	const merchantRules = await ctx.db
 		.query('merchantRules')
 		.withIndex('by_active', (q) => q.eq('active', true))
@@ -1147,35 +1213,6 @@ async function classifyFromRules(
 			classificationConfidence: 1,
 			userCategory: merchantRule.category
 		};
-	}
-
-	const providerCategory = categoryDetailed ?? categoryPrimary;
-
-	if (providerCategory) {
-		const categoryRule = (
-			await ctx.db
-				.query('categoryRules')
-				.withIndex('by_providerCategory', (q) => q.eq('providerCategory', providerCategory))
-				.take(1)
-		)[0];
-
-		if (categoryRule?.active) {
-			const classification = {
-				classification: categoryRule.classification,
-				classificationSource: 'category_rule' as const,
-				classificationConfidence: 0.9,
-				userCategory: categoryRule.category
-			};
-
-			if (categoryRule.kind) {
-				return {
-					...classification,
-					kind: categoryRule.kind
-				};
-			}
-
-			return classification;
-		}
 	}
 
 	return {

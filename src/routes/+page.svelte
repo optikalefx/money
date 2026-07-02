@@ -291,13 +291,6 @@
 		return transaction.accountMask ? `${label} ••${transaction.accountMask}` : label;
 	}
 
-	function providerCategoryFor(transaction: {
-		categoryDetailed: string | null;
-		categoryPrimary: string | null;
-	}) {
-		return transaction.categoryDetailed ?? transaction.categoryPrimary ?? '';
-	}
-
 	function loadPlaidScript() {
 		if (window.Plaid) return Promise.resolve();
 
@@ -464,15 +457,10 @@
 		errorMessage = '';
 
 		try {
-			const category = providerCategoryFor(transaction);
-			if (!category) {
-				throw new Error('This transaction does not have a category to use as a rule.');
-			}
-
-			await markCategoryExpectedMutation({
+			const result = await markCategoryExpectedMutation({
 				transactionId: transaction.id
 			});
-			statusMessage = `${category} will now be treated as expected.`;
+			statusMessage = `${result.category} will now be treated as expected (${result.updated} updated).`;
 		} catch (error) {
 			errorMessage =
 				error instanceof Error ? error.message : 'Unable to mark category as expected.';
@@ -490,15 +478,10 @@
 		errorMessage = '';
 
 		try {
-			const category = providerCategoryFor(transaction);
-			if (!category) {
-				throw new Error('This transaction does not have a category to ignore.');
-			}
-
-			await markCategoryTransferMutation({
+			const result = await markCategoryTransferMutation({
 				transactionId: transaction.id
 			});
-			statusMessage = `${category} will now be ignored as a transfer.`;
+			statusMessage = `${result.category} will now be ignored as a transfer (${result.updated} updated).`;
 		} catch (error) {
 			errorMessage =
 				error instanceof Error ? error.message : 'Unable to ignore category as transfer.';
@@ -543,6 +526,7 @@
 			</p>
 			<p class="hero-nav">
 				<a class="nav-link" href="/recurring">View recurring transactions →</a>
+				<a class="nav-link" href="/expected">Manage expected →</a>
 				<a class="nav-link" href="/categories">Manage categories →</a>
 			</p>
 		</div>
@@ -864,8 +848,8 @@
 										</button>
 										<ActionsMenu
 											disabled={markingTransactionId === transaction.id}
-											showCategoryActions={Boolean(providerCategoryFor(transaction)) &&
-												displayCategory(transaction) !== 'Uncategorized'}
+											showCategoryActions={Boolean(transaction.categorySlug) &&
+												transaction.categorySlug !== 'uncategorized'}
 											onExpectedMerchant={() => markTransaction(transaction, 'expected')}
 											onExpectedCategory={() => markExpectedCategory(transaction)}
 											onIgnoreTransfer={() => markTransferCategory(transaction)}
