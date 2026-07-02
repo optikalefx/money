@@ -41,9 +41,9 @@
 	--shadow-float: 0 10px 40px -10px rgb(193 140 93 / 20%);
 	--shadow-lift: 0 20px 40px -10px rgb(93 112 82 / 15%);
 
-	--container-page: min(100% - 2rem, 80rem);
-	--container-focused: min(100% - 2rem, 72rem);
-	--container-text: min(100% - 2rem, 48rem);
+	--container-page: min(100% - clamp(2rem, 8vw, 8rem), 80rem);
+	--container-focused: min(100% - clamp(2rem, 8vw, 8rem), 72rem);
+	--container-text: min(100% - clamp(2rem, 8vw, 8rem), 48rem);
 }
 
 * {

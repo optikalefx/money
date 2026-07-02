@@ -407,7 +407,8 @@
 				classification,
 				ruleMatchType: 'exact'
 			});
-			const label = classification === 'transfer' ? 'a transfer' : classificationLabel(classification);
+			const label =
+				classification === 'transfer' ? 'a transfer' : classificationLabel(classification);
 			statusMessage = `${row.merchantName ?? row.name} will now be treated as ${label}.`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to mark merchant.';
@@ -471,7 +472,6 @@
 		}
 	}
 
-
 	function summarizeBy(rows: LineRow[], keyFor: (row: LineRow) => string) {
 		const totals: Record<string, { label: string; total: number; count: number }> = {};
 
@@ -500,11 +500,12 @@
 <main class="money-shell">
 	<section class="hero">
 		<div>
-			<p class="eyebrow">Personal Money Tracker</p>
-			<h1>Review the money that moved outside the plan.</h1>
+			<p class="eyebrow">Unplanned Expense Tracker</p>
+			<h1>Review your Expenses</h1>
 			<p class="lede">
-				Dynamic is the default. Mark a merchant as recurring or expected once, and future matching
-				transactions can inherit that merchant-level rule.
+				Unplanned expenses are those dollars that you didn't plan to spend. Using this app you can
+				import your charges and online orders, remove what is recurring or planned for, and whats
+				left gives you a clear picture of where you money is going
 			</p>
 			<p class="hero-nav">
 				<a class="nav-link" href="/recurring">View recurring transactions →</a>
@@ -836,15 +837,26 @@
 													label: 'Expected merchant',
 													onSelect: () => markMerchant(row, 'expected')
 												},
-												{ label: 'Ignore as transfer', onSelect: () => markMerchant(row, 'transfer') },
+												{
+													label: 'Ignore as transfer',
+													onSelect: () => markMerchant(row, 'transfer')
+												},
 												...(line.sku
 													? [
-															{ label: 'Recurring item', onSelect: () => markItem(row, 'known_recurring') },
+															{
+																label: 'Recurring item',
+																onSelect: () => markItem(row, 'known_recurring')
+															},
 															{ label: 'Expected item', onSelect: () => markItem(row, 'expected') }
 														]
 													: []),
 												...(isCategorized
-													? [{ label: 'Expected category', onSelect: () => markExpectedCategory(row) }]
+													? [
+															{
+																label: 'Expected category',
+																onSelect: () => markExpectedCategory(row)
+															}
+														]
 													: [])
 											]}
 										/>
