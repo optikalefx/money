@@ -4,6 +4,7 @@
 	import type { Id } from '../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
 	import ActionsMenu from '$lib/ActionsMenu.svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic' | 'unreviewed';
 	type MerchantClassification = 'known_recurring' | 'expected';
@@ -43,6 +44,9 @@
 	let isConnectingGmail = $state(false);
 	let isSyncingGmail = $state(false);
 	let markingTransactionId = $state<string | null>(null);
+	// Rows the user chose to re-categorize via "Change category" — these swap their static
+	// category label for the same dropdown uncategorized rows already get.
+	const editingCategoryIds = new SvelteSet<string>();
 	let statusMessage = $state('');
 	let errorMessage = $state('');
 
@@ -455,7 +459,11 @@
 	}
 
 	async function assignCategory(transaction: { id: Id<'transactions'> }, categorySlug: string) {
-		if (!categorySlug) return;
+		// Picking the blank option just cancels an in-progress "Change category" edit.
+		if (!categorySlug) {
+			editingCategoryIds.delete(transaction.id);
+			return;
+		}
 		markingTransactionId = transaction.id;
 		errorMessage = '';
 
@@ -464,6 +472,7 @@
 				transactionId: transaction.id,
 				categorySlug
 			});
+			editingCategoryIds.delete(transaction.id);
 			statusMessage =
 				result.treatment === 'expected'
 					? `${result.category} is expected — moved out of the review queue (${result.updated} updated).`
@@ -806,6 +815,8 @@
 					</thead>
 					<tbody>
 						{#each sortedTransactions as transaction (transaction.id)}
+							{@const hasCategory =
+								Boolean(transaction.categorySlug) && transaction.categorySlug !== 'uncategorized'}
 							<tr>
 								<td data-label="Date">{transaction.date}</td>
 								<td data-label="Merchant">
@@ -833,13 +844,16 @@
 								</td>
 								<td data-label="Category">
 									<div class="category-stack">
-										{#if isUncategorized(transaction)}
+										{#if isUncategorized(transaction) || editingCategoryIds.has(transaction.id)}
 											<select
 												class="category-select"
 												disabled={markingTransactionId === transaction.id}
+												value={transaction.categorySlug && transaction.categorySlug !== 'uncategorized'
+													? transaction.categorySlug
+													: ''}
 												onchange={(event) => assignCategory(transaction, event.currentTarget.value)}
 											>
-												<option value="" selected>Uncategorized</option>
+												<option value="">Uncategorized</option>
 												{#each selectableCategories as category (category.slug)}
 													<option value={category.slug}>{category.name}</option>
 												{/each}
@@ -863,11 +877,28 @@
 										</button>
 										<ActionsMenu
 											disabled={markingTransactionId === transaction.id}
-											showCategoryActions={Boolean(transaction.categorySlug) &&
-												transaction.categorySlug !== 'uncategorized'}
-											onExpectedMerchant={() => markTransaction(transaction, 'expected')}
-											onExpectedCategory={() => markExpectedCategory(transaction)}
-											onIgnoreTransfer={() => markTransferCategory(transaction)}
+											items={[
+												{
+													label: 'Expected merchant',
+													onSelect: () => markTransaction(transaction, 'expected')
+												},
+												...(hasCategory
+													? [
+															{
+																label: 'Change category',
+																onSelect: () => editingCategoryIds.add(transaction.id)
+															},
+															{
+																label: 'Expected category',
+																onSelect: () => markExpectedCategory(transaction)
+															},
+															{
+																label: 'Ignore as transfer',
+																onSelect: () => markTransferCategory(transaction)
+															}
+														]
+													: [])
+											]}
 										/>
 									</div>
 								</td>

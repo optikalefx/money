@@ -151,10 +151,18 @@
 		statusMessage = 'Categorizing transactions with AI...';
 		try {
 			const result = await categorize({ force: forceRun });
-			statusMessage =
-				result.categorized === 0
-					? 'Nothing to categorize — everything is already cached.'
-					: `Categorized ${result.merchantUnits} merchant${result.merchantUnits === 1 ? '' : 's'} + ${result.asinUnits} Amazon item${result.asinUnits === 1 ? '' : 's'} in ${result.chunks} AI call${result.chunks === 1 ? '' : 's'}, applied to ${result.applied} record${result.applied === 1 ? '' : 's'}.`;
+			if (result.categorized === 0) {
+				statusMessage =
+					result.applied === 0
+						? 'Nothing to categorize — everything is already cached.'
+						: `Applied cached categories to ${result.applied} record${result.applied === 1 ? '' : 's'}.`;
+			} else {
+				const cacheNote =
+					result.cacheApplied > 0
+						? ` (${result.cacheApplied} from cache)`
+						: '';
+				statusMessage = `Categorized ${result.merchantUnits} merchant${result.merchantUnits === 1 ? '' : 's'} + ${result.asinUnits} Amazon item${result.asinUnits === 1 ? '' : 's'} in ${result.chunks} AI call${result.chunks === 1 ? '' : 's'}, applied to ${result.applied} record${result.applied === 1 ? '' : 's'}${cacheNote}.`;
+			}
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to categorize.';
 		} finally {

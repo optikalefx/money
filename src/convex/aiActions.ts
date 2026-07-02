@@ -48,6 +48,7 @@ export const categorizeTransactions = action({
 		categorized: number;
 		skipped: number;
 		applied: number;
+		cacheApplied: number;
 		merchantUnits: number;
 		asinUnits: number;
 		chunks: number;
@@ -56,14 +57,37 @@ export const categorizeTransactions = action({
 			force: args.force ?? false
 		});
 
+		// Merchants/ASINs that already have a cached category but still have uncategorized
+		// transactions: apply the cached slug directly, no AI call needed.
+		let cacheApplied = 0;
+		if (input.cachedMerchants.length > 0 || input.cachedAsins.length > 0) {
+			const res = await ctx.runMutation(internal.categories.saveCategoryAssignments, {
+				merchants: input.cachedMerchants,
+				asins: input.cachedAsins
+			});
+			cacheApplied = res.applied;
+			console.log(
+				`[categorize] applied cached categories to ${cacheApplied} record(s) from ` +
+					`${input.cachedMerchants.length} merchant(s) + ${input.cachedAsins.length} ASIN(s).`
+			);
+		}
+
 		const units: Unit[] = [
 			...input.merchantUnits.map((m) => ({ kind: 'merchant' as const, ...m })),
 			...input.asinUnits.map((a) => ({ kind: 'asin' as const, ...a }))
 		];
 
 		if (units.length === 0) {
-			console.log('[categorize] nothing to do — all merchants/ASINs already cached.');
-			return { categorized: 0, skipped: 0, applied: 0, merchantUnits: 0, asinUnits: 0, chunks: 0 };
+			console.log('[categorize] no new merchants/ASINs need the AI.');
+			return {
+				categorized: 0,
+				skipped: 0,
+				applied: cacheApplied,
+				cacheApplied,
+				merchantUnits: 0,
+				asinUnits: 0,
+				chunks: 0
+			};
 		}
 
 		const validSlugs = new Set(input.categories.map((c) => c.slug));
@@ -162,7 +186,8 @@ export const categorizeTransactions = action({
 		return {
 			categorized,
 			skipped,
-			applied,
+			applied: applied + cacheApplied,
+			cacheApplied,
 			merchantUnits: input.merchantUnits.length,
 			asinUnits: input.asinUnits.length,
 			chunks: groups.length
