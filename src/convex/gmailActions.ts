@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { action, env, type ActionCtx } from './_generated/server';
-import { internal } from './_generated/api';
+import { api, internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 import { RETAILER_ADAPTERS, type GmailMessage } from './adapters';
 
@@ -113,6 +113,13 @@ export const syncGmail = action({
 				status: 'success',
 				added
 			});
+
+			// Newly imported order items land in Uncategorized until the AI categorizer runs. Chain it
+			// (same as the Plaid sync) so a Gmail import always categorizes new items — it only calls
+			// the model for `(merchant, sku)` pairs not already cached, so a no-op import is cheap.
+			if (added > 0) {
+				await ctx.scheduler.runAfter(0, api.aiActions.categorizeTransactions, {});
+			}
 
 			return { scanned, imported: added };
 		} catch (error) {
