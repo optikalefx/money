@@ -64,31 +64,44 @@ export const syncGmail = action({
 
 		try {
 			const accessToken = await refreshAccessToken(ctx, account._id, account.refreshToken);
-			const query = env.GMAIL_AMAZON_QUERY || DEFAULT_AMAZON_QUERY;
-			const messageIds = await listMessageIds(accessToken, query);
 
 			let added = 0;
+			let scanned = 0;
 			let maxEpoch = account.lastMessageEpochMs ?? 0;
 
-			for (const messageId of messageIds) {
-				const message = await getMessage(accessToken, messageId);
-				const epoch = Number(message.internalDate ?? 0);
-				if (account.lastMessageEpochMs && epoch <= account.lastMessageEpochMs) continue;
-				if (epoch > maxEpoch) maxEpoch = epoch;
+			// Run each retailer adapter over its own Gmail search, importing store-agnostic orders.
+			for (const adapter of RETAILER_ADAPTERS) {
+				const messageIds = await listMessageIds(accessToken, adapterQuery(adapter));
+				scanned += messageIds.length;
 
-				// A single Amazon email can bundle multiple orders, each its own card charge.
-				const orderDate = epoch > 0 ? new Date(epoch).toISOString().slice(0, 10) : undefined;
-				for (const order of parseAmazonOrders(message)) {
-					await ctx.runMutation(internal.gmail.upsertAmazonOrder, {
-						gmailMessageId: message.id,
-						orderId: order.orderId,
-						orderDate,
-						total: order.total,
-						isoCurrencyCode: 'USD',
-						items: order.items,
-						raw: { snippet: message.snippet, orderId: order.orderId }
-					});
-					added += 1;
+				for (const messageId of messageIds) {
+					const message = await getMessage(accessToken, messageId);
+					const epoch = Number(message.internalDate ?? 0);
+					if (account.lastMessageEpochMs && epoch <= account.lastMessageEpochMs) continue;
+					if (epoch > maxEpoch) maxEpoch = epoch;
+
+					// A single email can bundle multiple orders, each its own card charge.
+					const orderDate = epoch > 0 ? new Date(epoch).toISOString().slice(0, 10) : undefined;
+					for (const order of adapter.parseOrders(message)) {
+						await ctx.runMutation(internal.gmail.upsertOrder, {
+							source: 'gmail',
+							merchant: adapter.merchant,
+							sourceMessageId: message.id,
+							orderId: order.orderId,
+							orderDate,
+							total: order.total,
+							isoCurrencyCode: 'USD',
+							items: order.items.map((item) => ({
+								title: item.title,
+								quantity: item.quantity,
+								amount: item.amount,
+								sku: item.sku
+							})),
+							merchantMatchers: adapter.merchantMatchers,
+							raw: { snippet: message.snippet, orderId: order.orderId }
+						});
+						added += 1;
+					}
 				}
 			}
 
@@ -102,7 +115,7 @@ export const syncGmail = action({
 				added
 			});
 
-			return { scanned: messageIds.length, imported: added };
+			return { scanned, imported: added };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : 'Unknown Gmail sync error';
 			await ctx.runMutation(internal.gmail.markGmailError, {
@@ -243,8 +256,18 @@ function htmlToText(html: string): string {
 
 const ORDER_ID_PATTERN = /(\d{3}-\d{7}-\d{7})/g;
 
-type ParsedItem = { title: string; quantity?: number; amount?: number; asin?: string };
+type ParsedItem = { title: string; quantity?: number; amount?: number; sku?: string };
 type ParsedOrder = { orderId: string; total?: number; items: ParsedItem[] };
+
+// A per-retailer email adapter. Amazon is the first; new stores add another adapter and nothing
+// else in the pipeline changes. `merchantMatchers` are the merchant-name patterns used to match a
+// parsed order to a Plaid charge.
+type RetailerEmailAdapter = {
+	merchant: string;
+	gmailQuery: string;
+	merchantMatchers: string[];
+	parseOrders: (message: GmailMessage) => ParsedOrder[];
+};
 
 // Each item's product link is a /gp/r.html redirect whose (URL-encoded) target is
 // .../dp/<ASIN>?ref_=..._i_fed_asin_title. There's exactly one title link per item, in order.
@@ -303,11 +326,28 @@ function parseAmazonOrders(message: GmailMessage): ParsedOrder[] {
 	const flatItems = orders.flatMap((order) => order.items);
 	if (asins.length === flatItems.length) {
 		flatItems.forEach((item, i) => {
-			item.asin = asins[i];
+			item.sku = asins[i];
 		});
 	}
 
 	return orders;
+}
+
+// The Amazon email adapter, built from the parser above. Its `sku` is the ASIN.
+const amazonAdapter: RetailerEmailAdapter = {
+	merchant: 'amazon',
+	gmailQuery: DEFAULT_AMAZON_QUERY,
+	merchantMatchers: ['amazon'],
+	parseOrders: parseAmazonOrders
+};
+
+// Registry of retailer adapters. Add a new store's adapter here to start importing its orders.
+const RETAILER_ADAPTERS: RetailerEmailAdapter[] = [amazonAdapter];
+
+// Per-adapter Gmail search query, honoring the optional Amazon env override.
+function adapterQuery(adapter: RetailerEmailAdapter): string {
+	if (adapter.merchant === 'amazon') return env.GMAIL_AMAZON_QUERY || adapter.gmailQuery;
+	return adapter.gmailQuery;
 }
 
 const AMOUNT = '\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)\\s*(?:USD)?';

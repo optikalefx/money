@@ -4,33 +4,50 @@
 	import type { Id } from '../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
 	import ActionsMenu from '$lib/ActionsMenu.svelte';
-	import { SvelteSet } from 'svelte/reactivity';
 
-	type Classification = 'known_recurring' | 'expected' | 'dynamic' | 'unreviewed';
+	type Classification = 'known_recurring' | 'expected' | 'dynamic';
 	type MerchantClassification = 'known_recurring' | 'expected';
+	// Merchant-level marks also allow 'transfer' (ignore this merchant's charges).
+	type MerchantMark = MerchantClassification | 'transfer';
+	// A resolved line item (the WHAT) as returned by the review-queue query.
+	type LineItem = {
+		merchant: string;
+		orderSource: string | null;
+		sku: string | null;
+		title: string;
+		quantity: number | null;
+		amount: number;
+		categorySlug: string;
+		category: string;
+		classification: Classification;
+		kind: 'expense' | 'transfer';
+	};
 	type TransactionRow = {
 		id: Id<'transactions'>;
 		date: string;
 		name: string;
 		merchantName: string | null;
+		normalizedMerchant: string;
 		amount: number;
 		kind: 'expense' | 'income' | 'transfer';
 		pending: boolean;
-		category: string;
-		categorySlug?: string | null;
-		classification: Classification;
-		classificationSource: string;
 		source: string;
 		institutionName?: string | null;
 		accountName?: string | null;
 		accountMask?: string | null;
 		removed?: boolean;
-		amazonItems?: Array<{
-			title: string;
-			quantity: number | null;
-			amount: number | null;
-			category?: string | null;
-		}>;
+		lineItems: LineItem[];
+	};
+	// One reviewable line item flattened together with its parent charge — the review queue's row.
+	type LineRow = {
+		txnId: Id<'transactions'>;
+		date: string;
+		merchantName: string | null;
+		name: string;
+		normalizedMerchant: string;
+		sourceLabel: string;
+		pending: boolean;
+		line: LineItem;
 	};
 
 	const today = new Date();
@@ -43,12 +60,15 @@
 	let isSyncing = $state(false);
 	let isConnectingGmail = $state(false);
 	let isSyncingGmail = $state(false);
-	let markingTransactionId = $state<string | null>(null);
-	// Rows the user chose to re-categorize via "Change category" — these swap their static
-	// category label for the same dropdown uncategorized rows already get.
-	const editingCategoryIds = new SvelteSet<string>();
+	// Key of the line-item row whose mutation is in flight (`txnId:sku`), so only its controls
+	// disable — a merchant with several items stays independently actionable.
+	let markingRowKey = $state<string | null>(null);
 	let statusMessage = $state('');
 	let errorMessage = $state('');
+
+	function rowKey(row: { txnId: string; line: { sku: string | null } }) {
+		return `${row.txnId}:${row.line.sku ?? ''}`;
+	}
 
 	const monthStart = $derived(`${selectedMonth}-01`);
 	const monthEnd = $derived(lastDayOfMonth(selectedMonth));
@@ -81,75 +101,73 @@
 	const getGmailAuthUrl = useAction(api.gmailActions.getGmailAuthUrl);
 	const syncGmailAction = useAction(api.gmailActions.syncGmail);
 	const markTransactionMutation = useMutation(api.plaid.markTransaction);
-	const markAmazonItemMutation = useMutation(api.gmail.markAmazonItem);
+	const markLineItemMutation = useMutation(api.plaid.markLineItem);
 	const markCategoryExpectedMutation = useMutation(api.plaid.markCategoryExpected);
-	const markCategoryTransferMutation = useMutation(api.plaid.markCategoryTransfer);
-	const setTransactionCategoryMutation = useMutation(api.plaid.setTransactionCategory);
+	const setLineItemCategoryMutation = useMutation(api.plaid.setLineItemCategory);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',
 		currency: 'USD'
 	});
 
-	const categoryNames = $derived(
-		new Map((categoriesQuery.data ?? []).map((category) => [category.slug, category.name]))
-	);
 	// Categories the user can pick from the review-queue dropdown (the Uncategorized fallback is
 	// never a target — picking it would be a no-op).
 	const selectableCategories = $derived(
 		(categoriesQuery.data ?? []).filter((category) => category.slug !== 'uncategorized')
 	);
 	const allTransactions = $derived((transactions.data ?? []) as TransactionRow[]);
-	const visibleTransactions = $derived.by(() => {
+
+	// The review queue is a flat list of dynamic-expense line items (the WHAT) within the month.
+	const dynamicLineRows = $derived.by(() => {
 		const term = searchTerm.trim().toLowerCase();
-
-		return allTransactions.filter((transaction) => {
-			const classification = effectiveClassification(transaction);
-
-			if (transaction.removed) return false;
-			if (transaction.kind !== 'expense') return false;
-			if (transaction.date < monthStart || transaction.date > monthEnd) return false;
-			if (classification !== 'dynamic') return false;
-			if (!term) return true;
-
-			return [
-				transaction.name,
-				transaction.merchantName,
-				displayCategory(transaction),
-				...(transaction.amazonItems?.map((item) => item.title) ?? [])
-			]
-				.filter(Boolean)
-				.some((value) => value!.toLowerCase().includes(term));
-		});
+		const rows: LineRow[] = [];
+		for (const transaction of allTransactions) {
+			if (transaction.removed) continue;
+			if (transaction.date < monthStart || transaction.date > monthEnd) continue;
+			for (const line of transaction.lineItems) {
+				if (line.classification !== 'dynamic' || line.kind !== 'expense') continue;
+				if (
+					term &&
+					![transaction.name, transaction.merchantName, line.title, line.category]
+						.filter(Boolean)
+						.some((value) => value!.toLowerCase().includes(term))
+				) {
+					continue;
+				}
+				rows.push({
+					txnId: transaction.id,
+					date: transaction.date,
+					merchantName: transaction.merchantName,
+					name: transaction.name,
+					normalizedMerchant: transaction.normalizedMerchant,
+					sourceLabel: sourceLabel(transaction),
+					pending: transaction.pending,
+					line
+				});
+			}
+		}
+		return rows;
 	});
 	// Optional amount sort layered on top of the filtered queue. Null keeps the default (date) order.
-	const sortedTransactions = $derived.by(() => {
-		if (!amountSort) return visibleTransactions;
+	const sortedLineRows = $derived.by(() => {
+		if (!amountSort) return dynamicLineRows;
 		const dir = amountSort === 'asc' ? 1 : -1;
-		return [...visibleTransactions].sort((a, b) => (a.amount - b.amount) * dir);
+		return [...dynamicLineRows].sort((a, b) => (a.line.amount - b.line.amount) * dir);
 	});
-	const dynamicRows = $derived(
-		allTransactions.filter(
-			(transaction) =>
-				!transaction.removed &&
-				transaction.kind === 'expense' &&
-				effectiveClassification(transaction) === 'dynamic' &&
-				transaction.date >= monthStart &&
-				transaction.date <= monthEnd
-		)
-	);
 	const dynamicByMerchant = $derived(
-		summarizeBy(dynamicRows, (transaction) => transaction.merchantName ?? transaction.name)
+		summarizeBy(dynamicLineRows, (row) => row.merchantName ?? row.name)
 	);
-	const recurringCount = $derived(
-		allTransactions.filter(
-			(transaction) =>
-				!transaction.removed &&
-				effectiveClassification(transaction) === 'known_recurring' &&
-				transaction.date >= monthStart &&
-				transaction.date <= monthEnd
-		).length
-	);
+	const recurringCount = $derived.by(() => {
+		let count = 0;
+		for (const transaction of allTransactions) {
+			if (transaction.removed) continue;
+			if (transaction.date < monthStart || transaction.date > monthEnd) continue;
+			for (const line of transaction.lineItems) {
+				if (line.classification === 'known_recurring') count += 1;
+			}
+		}
+		return count;
+	});
 	// Month-over-month view (server-computed, canonical categories incl. exploded Amazon items).
 	const monthlyMonths = $derived(monthlyBreakdown.data?.months ?? []);
 	const selectedMonthBreakdown = $derived(
@@ -240,55 +258,32 @@
 		return value.replace('_', ' ');
 	}
 
-	function effectiveClassification(
-		transaction: TransactionRow
-	): Exclude<Classification, 'unreviewed'> {
-		return transaction.classification === 'unreviewed' ? 'dynamic' : transaction.classification;
-	}
-
-	function slugName(slug: string) {
-		return (
-			categoryNames.get(slug) ??
-			slug
-				.split('-')
-				.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-				.join(' ')
-		);
-	}
-
-	// A non-Amazon row with no resolved canonical category. These get a category dropdown in the
-	// review queue instead of a plain "Uncategorized" label. Amazon rows are categorized per item.
-	function isUncategorized(transaction: TransactionRow) {
-		if (transaction.amazonItems && transaction.amazonItems.length) return false;
-		return !transaction.categorySlug || transaction.categorySlug === 'uncategorized';
-	}
-
-	// The canonical category to show in the review queue. Amazon rows carry per-item categories;
-	// everything else uses the backend-resolved category name ('Uncategorized' when uncategorized).
-	function displayCategory(transaction: TransactionRow) {
-		if (transaction.amazonItems && transaction.amazonItems.length) {
-			const names = [
-				...new Set(
-					transaction.amazonItems
-						.map((item) => item.category)
-						.filter((slug): slug is string => !!slug)
-						.map(slugName)
-				)
-			];
-			if (names.length) return names.join(', ');
-		}
-		return transaction.category;
-	}
-
-	// The source line under a merchant in the review queue: the provider ("plaid") plus the
-	// connected account it came from — institution name and, when present, the last 4 (useful
-	// for telling credit cards apart). Falls back to a bare provider when no account is linked.
-	function sourceLabel(transaction: TransactionRow) {
+	// The source line under a row: the provider ("plaid") plus the connected account it came from —
+	// institution name and, when present, the last 4. Falls back to a bare provider.
+	function sourceLabel(transaction: {
+		source: string;
+		institutionName?: string | null;
+		accountName?: string | null;
+		accountMask?: string | null;
+	}) {
 		const accountLabel = transaction.institutionName ?? transaction.accountName;
 		const parts = [transaction.source];
 		if (accountLabel) parts.push(accountLabel);
 		const label = parts.join(' · ');
 		return transaction.accountMask ? `${label} ••${transaction.accountMask}` : label;
+	}
+
+	function capitalize(value: string) {
+		return value.charAt(0).toUpperCase() + value.slice(1);
+	}
+
+	// The source line for a line item: an order-derived item shows where it was bought
+	// ("Gmail · Amazon"); a plain Plaid line shows the charge account ("plaid · Chase ••2107").
+	function lineSource(row: LineRow) {
+		if (row.line.orderSource) {
+			return `${capitalize(row.line.orderSource)} · ${capitalize(row.line.merchant)}`;
+		}
+		return row.sourceLabel;
 	}
 
 	function loadPlaidScript() {
@@ -402,112 +397,88 @@
 		}
 	}
 
-	async function markTransaction(
-		transaction: {
-			id: Id<'transactions'>;
-			merchantName: string | null;
-			name: string;
-			amazonItems?: Array<{ title: string }>;
-		},
-		classification: MerchantClassification
-	) {
-		markingTransactionId = transaction.id;
+	// Mark the merchant (WHERE) of the row's charge as expected/recurring.
+	async function markMerchant(row: LineRow, classification: MerchantMark) {
+		markingRowKey = rowKey(row);
 		errorMessage = '';
-
 		try {
-			// Amazon rows are keyed on the item's ASIN, so repeat purchases auto-classify
-			// without reclassifying every unrelated Amazon transaction.
-			if (transaction.amazonItems && transaction.amazonItems.length) {
-				const result = await markAmazonItemMutation({
-					transactionId: transaction.id,
-					classification
-				});
-				const label = transaction.amazonItems[0].title;
-				statusMessage = `${label} will now be treated as ${classificationLabel(classification)} (${result.updated} matching transaction${result.updated === 1 ? '' : 's'}).`;
-				return;
-			}
-
 			await markTransactionMutation({
-				transactionId: transaction.id,
+				transactionId: row.txnId,
 				classification,
-				createMerchantRule: true,
 				ruleMatchType: 'exact'
 			});
-			statusMessage = `${transaction.merchantName ?? transaction.name} will now be treated as ${classificationLabel(classification)}.`;
+			const label = classification === 'transfer' ? 'a transfer' : classificationLabel(classification);
+			statusMessage = `${row.merchantName ?? row.name} will now be treated as ${label}.`;
 		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : 'Unable to mark transaction.';
+			errorMessage = error instanceof Error ? error.message : 'Unable to mark merchant.';
 		} finally {
-			markingTransactionId = null;
+			markingRowKey = null;
 		}
 	}
 
-	async function markExpectedCategory(transaction: { id: Id<'transactions'> }) {
-		markingTransactionId = transaction.id;
+	// Mark the item (WHAT) of the row as expected/recurring — only for sku-bearing lines.
+	async function markItem(row: LineRow, classification: MerchantClassification) {
+		if (!row.line.sku) return;
+		markingRowKey = rowKey(row);
 		errorMessage = '';
-
 		try {
-			const result = await markCategoryExpectedMutation({
-				transactionId: transaction.id
+			const result = await markLineItemMutation({
+				merchant: row.line.merchant,
+				sku: row.line.sku,
+				title: row.line.title,
+				classification
 			});
-			statusMessage = `${result.category} will now be treated as expected (${result.updated} updated).`;
+			statusMessage = `${row.line.title} will now be treated as ${classificationLabel(classification)} (${result.updated} matching transaction${result.updated === 1 ? '' : 's'}).`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to mark item.';
+		} finally {
+			markingRowKey = null;
+		}
+	}
+
+	async function assignCategory(row: LineRow, categorySlug: string) {
+		if (!categorySlug) return;
+		markingRowKey = rowKey(row);
+		errorMessage = '';
+		try {
+			const result = await setLineItemCategoryMutation({
+				merchant: row.line.merchant,
+				sku: row.line.sku ?? undefined,
+				categorySlug
+			});
+			statusMessage =
+				result.treatment === 'expected'
+					? `${result.category} is expected — moved out of the review queue.`
+					: `Categorized as ${result.category}.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to set category.';
+		} finally {
+			markingRowKey = null;
+		}
+	}
+
+	async function markExpectedCategory(row: LineRow) {
+		markingRowKey = rowKey(row);
+		errorMessage = '';
+		try {
+			const result = await markCategoryExpectedMutation({ categorySlug: row.line.categorySlug });
+			statusMessage = `${result.category} will now be treated as expected.`;
 		} catch (error) {
 			errorMessage =
 				error instanceof Error ? error.message : 'Unable to mark category as expected.';
 		} finally {
-			markingTransactionId = null;
+			markingRowKey = null;
 		}
 	}
 
-	async function assignCategory(transaction: { id: Id<'transactions'> }, categorySlug: string) {
-		// Picking the blank option just cancels an in-progress "Change category" edit.
-		if (!categorySlug) {
-			editingCategoryIds.delete(transaction.id);
-			return;
-		}
-		markingTransactionId = transaction.id;
-		errorMessage = '';
 
-		try {
-			const result = await setTransactionCategoryMutation({
-				transactionId: transaction.id,
-				categorySlug
-			});
-			editingCategoryIds.delete(transaction.id);
-			statusMessage =
-				result.treatment === 'expected'
-					? `${result.category} is expected — moved out of the review queue (${result.updated} updated).`
-					: `Categorized as ${result.category} (${result.updated} updated).`;
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : 'Unable to set category.';
-		} finally {
-			markingTransactionId = null;
-		}
-	}
-
-	async function markTransferCategory(transaction: { id: Id<'transactions'> }) {
-		markingTransactionId = transaction.id;
-		errorMessage = '';
-
-		try {
-			const result = await markCategoryTransferMutation({
-				transactionId: transaction.id
-			});
-			statusMessage = `${result.category} will now be ignored as a transfer (${result.updated} updated).`;
-		} catch (error) {
-			errorMessage =
-				error instanceof Error ? error.message : 'Unable to ignore category as transfer.';
-		} finally {
-			markingTransactionId = null;
-		}
-	}
-
-	function summarizeBy(rows: TransactionRow[], keyFor: (row: TransactionRow) => string) {
+	function summarizeBy(rows: LineRow[], keyFor: (row: LineRow) => string) {
 		const totals: Record<string, { label: string; total: number; count: number }> = {};
 
 		for (const row of rows) {
 			const label = keyFor(row);
 			const existing = totals[label] ?? { label, total: 0, count: 0 };
-			existing.total += row.amount;
+			existing.total += row.line.amount;
 			existing.count += 1;
 			totals[label] = existing;
 		}
@@ -781,7 +752,7 @@
 				<div class="empty-state">Loading transactions...</div>
 			{:else if transactions.error}
 				<div class="empty-state">Unable to load transactions.</div>
-			{:else if visibleTransactions.length}
+			{:else if sortedLineRows.length}
 				<table>
 					<colgroup>
 						<col class="date-col" />
@@ -810,93 +781,70 @@
 									>
 								</button>
 							</th>
-							<th>Set merchant rule</th>
+							<th>Actions</th>
 						</tr>
 					</thead>
 					<tbody>
-						{#each sortedTransactions as transaction (transaction.id)}
-							{@const hasCategory =
-								Boolean(transaction.categorySlug) && transaction.categorySlug !== 'uncategorized'}
+						{#each sortedLineRows as row (rowKey(row))}
+							{@const line = row.line}
+							{@const key = rowKey(row)}
+							{@const busy = markingRowKey === key}
+							{@const short = truncateWords(line.title, 6)}
+							{@const isCategorized = line.categorySlug !== 'uncategorized'}
 							<tr>
-								<td data-label="Date">{transaction.date}</td>
+								<td data-label="Date">{row.date}</td>
 								<td data-label="Merchant">
-									{#if transaction.amazonItems && transaction.amazonItems.length}
-										{#each transaction.amazonItems as item, i (i)}
-											{@const short = truncateWords(item.title, 6)}
-											<strong use:tooltip={short === item.title ? undefined : item.title}
-												>{short}{#if item.quantity && item.quantity > 1}
-													×{item.quantity}{/if}</strong
-											>
-										{/each}
-										<span class="source-line"
-											>Gmail · {transaction.merchantName ?? transaction.name}</span
-										>
-									{:else}
-										{@const merchant = transaction.merchantName ?? transaction.name}
-										<strong use:tooltip={merchant === transaction.name ? undefined : transaction.name}
-											>{merchant}</strong
-										>
-										<span class="source-line">{sourceLabel(transaction)}</span>
-									{/if}
-									{#if transaction.pending}
+									<strong use:tooltip={short === line.title ? undefined : line.title}
+										>{short}{#if line.quantity && line.quantity > 1}
+											×{line.quantity}{/if}</strong
+									>
+									<span class="source-line">{lineSource(row)}</span>
+									{#if row.pending}
 										<span class="pending-chip">Pending</span>
 									{/if}
 								</td>
 								<td data-label="Category">
 									<div class="category-stack">
-										{#if isUncategorized(transaction) || editingCategoryIds.has(transaction.id)}
-											<select
-												class="category-select"
-												disabled={markingTransactionId === transaction.id}
-												value={transaction.categorySlug && transaction.categorySlug !== 'uncategorized'
-													? transaction.categorySlug
-													: ''}
-												onchange={(event) => assignCategory(transaction, event.currentTarget.value)}
-											>
-												<option value="">Uncategorized</option>
-												{#each selectableCategories as category (category.slug)}
-													<option value={category.slug}>{category.name}</option>
-												{/each}
-											</select>
-										{:else}
-											<span>{displayCategory(transaction)}</span>
-										{/if}
+										<select
+											class="category-select"
+											disabled={busy}
+											value={isCategorized ? line.categorySlug : ''}
+											onchange={(event) => assignCategory(row, event.currentTarget.value)}
+										>
+											<option value="">Uncategorized</option>
+											{#each selectableCategories as category (category.slug)}
+												<option value={category.slug}>{category.name}</option>
+											{/each}
+										</select>
 									</div>
 								</td>
-								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
-								>
-								<td data-label="Set merchant rule">
+								<td class="amount-column" data-label="Amount">{formatAmount(line.amount)}</td>
+								<td data-label="Actions">
 									<div class="mark-actions">
 										<button
 											type="button"
 											title="Treat this merchant as recurring"
-											disabled={markingTransactionId === transaction.id}
-											onclick={() => markTransaction(transaction, 'known_recurring')}
+											disabled={busy}
+											onclick={() => markMerchant(row, 'known_recurring')}
 										>
 											Recurring merchant
 										</button>
 										<ActionsMenu
-											disabled={markingTransactionId === transaction.id}
+											disabled={busy}
 											items={[
 												{
 													label: 'Expected merchant',
-													onSelect: () => markTransaction(transaction, 'expected')
+													onSelect: () => markMerchant(row, 'expected')
 												},
-												...(hasCategory
+												{ label: 'Ignore as transfer', onSelect: () => markMerchant(row, 'transfer') },
+												...(line.sku
 													? [
-															{
-																label: 'Change category',
-																onSelect: () => editingCategoryIds.add(transaction.id)
-															},
-															{
-																label: 'Expected category',
-																onSelect: () => markExpectedCategory(transaction)
-															},
-															{
-																label: 'Ignore as transfer',
-																onSelect: () => markTransferCategory(transaction)
-															}
+															{ label: 'Recurring item', onSelect: () => markItem(row, 'known_recurring') },
+															{ label: 'Expected item', onSelect: () => markItem(row, 'expected') }
 														]
+													: []),
+												...(isCategorized
+													? [{ label: 'Expected category', onSelect: () => markExpectedCategory(row) }]
 													: [])
 											]}
 										/>

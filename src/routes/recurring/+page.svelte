@@ -4,6 +4,15 @@
 	import type { Id } from '../../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
 
+	type LineItem = {
+		merchant: string;
+		orderSource: string | null;
+		sku: string | null;
+		title: string;
+		amount: number;
+		categorySlug: string;
+		category: string;
+	};
 	type RecurringRow = {
 		id: Id<'transactions'>;
 		date: string;
@@ -12,13 +21,13 @@
 		amount: number;
 		kind: 'expense' | 'income' | 'transfer';
 		pending: boolean;
-		category: string;
-		classificationSource: string;
 		source: string;
-		amazonItems?: Array<{ title: string; quantity: number | null; amount: number | null }>;
+		lineItems: LineItem[];
 	};
 	type MerchantRow = {
 		key: string;
+		merchant: string;
+		sku: string | null;
 		asin: string | null;
 		normalizedMerchant: string;
 		label: string;
@@ -46,8 +55,10 @@
 	const table = useQuery(api.plaid.getRecurringTransactions, () => tableArgs, {
 		keepPreviousData: true
 	});
+	const categoriesQuery = useQuery(api.categories.listCategories, () => ({}));
 	const unmarkRecurringMutation = useMutation(api.plaid.unmarkRecurring);
-	const unmarkAmazonItemMutation = useMutation(api.gmail.unmarkAmazonItem);
+	const unmarkLineItemMutation = useMutation(api.plaid.unmarkLineItem);
+	const setLineItemCategoryMutation = useMutation(api.plaid.setLineItemCategory);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',
@@ -57,6 +68,39 @@
 	const byCategory = $derived(summaryData?.byCategory ?? []);
 	const byMerchant = $derived((summaryData?.byMerchant ?? []) as MerchantRow[]);
 	const transactions = $derived((table.data ?? []) as RecurringRow[]);
+	const selectableCategories = $derived(
+		(categoriesQuery.data ?? []).filter((category) => category.slug !== 'uncategorized')
+	);
+	let markingCategoryKey = $state<string | null>(null);
+
+	function capitalize(value: string) {
+		return value.charAt(0).toUpperCase() + value.slice(1);
+	}
+	function lineSource(row: RecurringRow, line: LineItem) {
+		if (line.orderSource) return `${capitalize(line.orderSource)} · ${capitalize(line.merchant)}`;
+		return row.source;
+	}
+	function lineKey(rowId: string, line: LineItem) {
+		return `${rowId}:${line.sku ?? ''}`;
+	}
+
+	async function assignCategory(row: RecurringRow, line: LineItem, categorySlug: string) {
+		if (!categorySlug) return;
+		markingCategoryKey = lineKey(row.id, line);
+		errorMessage = '';
+		try {
+			const result = await setLineItemCategoryMutation({
+				merchant: line.merchant,
+				sku: line.sku ?? undefined,
+				categorySlug
+			});
+			statusMessage = `Categorized as ${result.category}.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to set category.';
+		} finally {
+			markingCategoryKey = null;
+		}
+	}
 
 	function lastDayOfMonth(month: string) {
 		const [year, monthIndex] = month.split('-').map(Number);
@@ -68,18 +112,14 @@
 		return currency.format(amount);
 	}
 
-	function categoryFor(transaction: RecurringRow) {
-		return transaction.category;
-	}
-
 	async function unmark(merchant: MerchantRow) {
 		unmarkingKey = merchant.key;
 		errorMessage = '';
 
 		try {
-			// Amazon rows are keyed on the item ASIN; everything else on the merchant.
-			const result = merchant.asin
-				? await unmarkAmazonItemMutation({ asin: merchant.asin })
+			// Item rows are keyed on `(merchant, sku)`; everything else on the merchant.
+			const result = merchant.sku
+				? await unmarkLineItemMutation({ merchant: merchant.merchant, sku: merchant.sku })
 				: await unmarkRecurringMutation({ normalizedMerchant: merchant.normalizedMerchant });
 			statusMessage = `${merchant.label} is no longer recurring (${result.updated} transaction${
 				result.updated === 1 ? '' : 's'
@@ -242,25 +282,33 @@
 							<tr>
 								<td data-label="Date">{transaction.date}</td>
 								<td data-label="Merchant">
-									{#if transaction.amazonItems && transaction.amazonItems.length}
-										{#each transaction.amazonItems as item, i (i)}
-											{@const short = truncateWords(item.title, 6)}
-											<strong use:tooltip={short === item.title ? undefined : item.title}
-												>{short}</strong
-											>
-										{/each}
-										<span class="source-line"
-											>Gmail · {transaction.merchantName ?? transaction.name}</span
-										>
-									{:else}
-										<strong>{transaction.merchantName ?? transaction.name}</strong>
-										<span class="source-line">{transaction.source}</span>
-									{/if}
+									{#each transaction.lineItems as line, i (i)}
+										{@const short = truncateWords(line.title, 6)}
+										<strong use:tooltip={short === line.title ? undefined : line.title}>{short}</strong>
+									{/each}
+									<span class="source-line">{lineSource(transaction, transaction.lineItems[0])}</span>
 									{#if transaction.pending}
 										<span class="pending-chip">Pending</span>
 									{/if}
 								</td>
-								<td data-label="Category">{categoryFor(transaction)}</td>
+								<td data-label="Category">
+									<div class="category-stack">
+										{#each transaction.lineItems as line, i (i)}
+											<select
+												class="category-select"
+												disabled={markingCategoryKey === lineKey(transaction.id, line)}
+												value={line.categorySlug !== 'uncategorized' ? line.categorySlug : ''}
+												onchange={(event) =>
+													assignCategory(transaction, line, event.currentTarget.value)}
+											>
+												<option value="">Uncategorized</option>
+												{#each selectableCategories as category (category.slug)}
+													<option value={category.slug}>{category.name}</option>
+												{/each}
+											</select>
+										{/each}
+									</div>
+								</td>
 								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
 								>
 							</tr>
@@ -497,6 +545,31 @@
 	.source-line {
 		color: var(--color-muted-foreground);
 		font-size: 0.82rem;
+	}
+
+	.category-stack {
+		display: grid;
+		gap: 0.35rem;
+		align-items: start;
+	}
+
+	.category-select {
+		width: 100%;
+		min-height: 2.4rem;
+		padding: 0.45rem 0.6rem;
+		color: var(--color-foreground);
+		background: rgb(254 254 250 / 78%);
+		border: 1px solid rgb(222 216 207 / 80%);
+		border-radius: var(--radius-pill);
+		font: inherit;
+		font-size: 0.82rem;
+		font-weight: 800;
+		cursor: pointer;
+	}
+
+	.category-select:disabled {
+		cursor: not-allowed;
+		opacity: 0.58;
 	}
 
 	.table-shell {

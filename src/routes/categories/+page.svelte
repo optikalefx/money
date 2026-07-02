@@ -61,7 +61,9 @@
 
 	const provider = $derived(providerOverride ?? aiConfig.data?.aiProvider ?? 'openai');
 	const model = $derived(modelOverride ?? aiConfig.data?.aiModel ?? '');
-	const rows = $derived((categories.data ?? []) as CategoryRow[]);
+	const rows = $derived(
+		[...((categories.data ?? []) as CategoryRow[])].sort((a, b) => a.name.localeCompare(b.name))
+	);
 
 	onMount(() => {
 		ensureDefaults({}).catch(() => {});
@@ -112,11 +114,9 @@
 	async function changeTreatment(row: CategoryRow, treatment: CategoryTreatment) {
 		errorMessage = '';
 		try {
-			const result = await setCategoryTreatment({ id: row.id, treatment });
+			await setCategoryTreatment({ id: row.id, treatment });
 			const label = treatment ?? 'dynamic';
-			statusMessage = `${row.name} is now ${label} (${result.updated} transaction${
-				result.updated === 1 ? '' : 's'
-			} reclassified).`;
+			statusMessage = `${row.name} is now ${label}.`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to update treatment.';
 		}
@@ -157,11 +157,7 @@
 						? 'Nothing to categorize — everything is already cached.'
 						: `Applied cached categories to ${result.applied} record${result.applied === 1 ? '' : 's'}.`;
 			} else {
-				const cacheNote =
-					result.cacheApplied > 0
-						? ` (${result.cacheApplied} from cache)`
-						: '';
-				statusMessage = `Categorized ${result.merchantUnits} merchant${result.merchantUnits === 1 ? '' : 's'} + ${result.asinUnits} Amazon item${result.asinUnits === 1 ? '' : 's'} in ${result.chunks} AI call${result.chunks === 1 ? '' : 's'}, applied to ${result.applied} record${result.applied === 1 ? '' : 's'}${cacheNote}.`;
+				statusMessage = `Categorized ${result.merchantUnits} merchant${result.merchantUnits === 1 ? '' : 's'} + ${result.itemUnits} item${result.itemUnits === 1 ? '' : 's'} in ${result.chunks} AI call${result.chunks === 1 ? '' : 's'}.`;
 			}
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to categorize.';
@@ -404,11 +400,18 @@
 							{@const draft = draftFor(row)}
 							<tr>
 								<td class="name-cell">
-									<input
-										type="text"
-										value={draft.name}
-										oninput={(event) => updateDraft(row, { name: event.currentTarget.value })}
-									/>
+									{#if row.slug === 'uncategorized'}
+										<span class="fixed-name">{row.name}</span>
+									{:else}
+										<input
+											type="text"
+											value={draft.name}
+											oninput={(event) => updateDraft(row, { name: event.currentTarget.value })}
+										/>
+									{/if}
+									{#if row.treatment === 'expected'}
+										<span class="treatment-tag">Expected</span>
+									{/if}
 								</td>
 								<td class="desc-cell">
 									<textarea
@@ -433,16 +436,12 @@
 										<ActionsMenu
 											items={[
 												{
-													label: 'Mark as Expected',
-													active: row.treatment === 'expected',
+													label:
+														row.treatment === 'expected'
+															? 'Unmark as expected'
+															: 'Mark as Expected',
 													onSelect: () =>
 														changeTreatment(row, row.treatment === 'expected' ? null : 'expected')
-												},
-												{
-													label: 'Ignore as Transfer',
-													active: row.treatment === 'transfer',
-													onSelect: () =>
-														changeTreatment(row, row.treatment === 'transfer' ? null : 'transfer')
 												},
 												{ label: 'Delete', destructive: true, onSelect: () => removeCategory(row) }
 											]}
@@ -558,14 +557,15 @@
 
 	.suggestion-list {
 		display: grid;
-		gap: 1rem;
+		gap: 1.25rem;
 	}
 
 	.suggestion-card {
-		padding: 1.1rem 1.25rem;
-		background: rgb(254 254 250 / 82%);
-		border: 1px solid rgb(222 216 207 / 70%);
+		padding: 1.25rem 1.4rem;
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
 		border-radius: 1.4rem 2.2rem 1.5rem 1.9rem;
+		box-shadow: var(--shadow-soft);
 	}
 
 	.suggestion-head {
@@ -710,12 +710,29 @@
 	/* Fixed name + compact actions, so AI guidance takes all remaining width. */
 	.name-col,
 	.name-cell {
-		width: 12rem;
+		width: 15rem;
 	}
 
 	/* Enforce the minimum on the input so table auto-layout can't collapse the column. */
 	.name-cell input {
-		min-width: 9rem;
+		min-width: 12rem;
+	}
+
+	/* The Uncategorized fallback name is fixed — shown as a label, not an editable input. */
+	.fixed-name {
+		display: inline-block;
+		padding: 0.4rem 0.7rem;
+		font-weight: 800;
+	}
+
+	.treatment-tag {
+		display: block;
+		margin-top: 0.3rem;
+		margin-left: 0.2rem;
+		color: var(--color-secondary);
+		font-size: 0.75rem;
+		font-style: italic;
+		font-weight: 800;
 	}
 
 	.desc-cell {

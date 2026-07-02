@@ -7,23 +7,30 @@ import {
 	type MutationCtx,
 	type QueryCtx
 } from './_generated/server';
-import type { Id } from './_generated/dataModel';
-import { CATEGORY_OWNED_SOURCES, reclassifyCategoryTransactions, treatmentPatch } from './categories';
+import type { Doc, Id } from './_generated/dataModel';
+import { applyMerchantCategory, applyItemCategory } from './categories';
+import {
+	categoryDisplayLabel,
+	loadResolutionData,
+	resolveTransactionLineItems,
+	type Classification,
+	type ResolutionData,
+	type ResolvedLineItem
+} from './resolution';
 
-const transactionClassification = v.union(
-	v.literal('known_recurring'),
-	v.literal('expected'),
-	v.literal('dynamic'),
-	v.literal('unreviewed')
-);
 const manualTransactionClassification = v.union(
 	v.literal('known_recurring'),
 	v.literal('expected')
 );
+// Merchant-level marks additionally allow 'transfer' (ignore this merchant's charges).
+const merchantMarkClassification = v.union(
+	v.literal('known_recurring'),
+	v.literal('expected'),
+	v.literal('transfer')
+);
 const transactionKind = v.union(v.literal('expense'), v.literal('income'), v.literal('transfer'));
 const transactionFiltersValidator = {
 	limit: v.optional(v.number()),
-	classification: v.optional(transactionClassification),
 	startDate: v.optional(v.string()),
 	endDate: v.optional(v.string()),
 	search: v.optional(v.string())
@@ -42,8 +49,7 @@ const plaidTransactionValidator = v.object({
 	isoCurrencyCode: v.optional(v.string()),
 	pending: v.boolean(),
 	categoryPrimary: v.optional(v.string()),
-	categoryDetailed: v.optional(v.string()),
-	raw: v.any()
+	categoryDetailed: v.optional(v.string())
 });
 
 function publicItem(item: {
@@ -99,31 +105,42 @@ export const listRecentTransactions = query({
 		const limit = Math.min(args.limit ?? 50, 100);
 		const rows = await readTransactions(ctx, {
 			limit,
-			classification: args.classification,
 			startDate: args.startDate,
 			endDate: args.endDate,
 			search: args.search
 		});
-		const names = await categoryNameMap(ctx);
+		const data = await loadResolutionData(ctx);
 		return Promise.all(
-			rows.map(async (transaction) => ({
-				id: transaction._id,
-				date: transaction.date,
-				name: transaction.name,
-				merchantName: transaction.merchantName ?? null,
-				normalizedMerchant: transaction.normalizedMerchant,
-				amount: transaction.amount,
-				kind: transaction.kind,
-				pending: transaction.pending,
-				categorySlug: transaction.categorySlug ?? null,
-				category: categoryLabel(names, transaction.categorySlug),
-				classification: transaction.classification,
-				classificationSource: transaction.classificationSource,
-				source: transaction.source,
-				...(await sourceAccountForTransaction(ctx, transaction)),
-				removed: transaction.removed,
-				amazonItems: await amazonItemsForTransaction(ctx, transaction)
-			}))
+			rows.map(async (transaction) => {
+				const lineItems = resolveTransactionLineItems(transaction, data);
+				return {
+					id: transaction._id,
+					date: transaction.date,
+					name: transaction.name,
+					merchantName: transaction.merchantName ?? null,
+					normalizedMerchant: transaction.normalizedMerchant,
+					amount: transaction.amount,
+					kind: transaction.kind,
+					pending: transaction.pending,
+					source: transaction.source,
+					...(await sourceAccountForTransaction(ctx, transaction)),
+					removed: transaction.removed,
+					// The WHAT: each purchased unit with its resolved category + classification. A plain
+					// Plaid charge yields one line; a matched order yields its items.
+					lineItems: lineItems.map((item) => ({
+						merchant: item.merchant,
+						orderSource: item.orderSource,
+						sku: item.sku,
+						title: item.title,
+						quantity: item.quantity,
+						amount: item.allocatedAmount,
+						categorySlug: item.categorySlug,
+						category: item.category,
+						classification: item.classification,
+						kind: item.kind
+					}))
+				};
+			})
 		);
 	}
 });
@@ -149,121 +166,38 @@ async function sourceAccountForTransaction(
 	};
 }
 
-// The primary (first) purchased item with an ASIN for an Amazon transaction, used to group
-// recurring Amazon spend by item instead of by the shared "amazon" merchant.
-async function primaryAsinForTransaction(
+// Load active transactions in a date range and resolve every line item, each tagged with its
+// parent transaction. The shared basis for the dynamic/recurring/expected read paths.
+async function resolvedLinesInRange(
 	ctx: QueryCtx,
-	transactionId: Id<'transactions'>
-): Promise<{ asin: string; title: string } | null> {
-	const order = (
-		await ctx.db
-			.query('amazonOrders')
-			.withIndex('by_matchedTransactionId', (q) => q.eq('matchedTransactionId', transactionId))
-			.take(1)
-	)[0];
-	if (!order) return null;
-
-	const items = await ctx.db
-		.query('amazonOrderItems')
-		.withIndex('by_amazonOrderId', (q) => q.eq('amazonOrderId', order._id))
-		.take(20);
-	const item = items.find((candidate) => candidate.asin);
-	return item?.asin ? { asin: item.asin, title: item.title } : null;
-}
-
-// For Amazon transactions, surface the actual purchased items (from a matched Gmail order)
-// so the review queue shows the item bought instead of a generic "Amazon" line.
-async function amazonItemsForTransaction(
-	ctx: QueryCtx,
-	transaction: { _id: Id<'transactions'>; normalizedMerchant: string }
-) {
-	if (!transaction.normalizedMerchant.includes('amazon')) return [];
-
-	const orders = await ctx.db
-		.query('amazonOrders')
-		.withIndex('by_matchedTransactionId', (q) => q.eq('matchedTransactionId', transaction._id))
-		.take(4);
-	const items: Array<{
-		title: string;
-		quantity: number | null;
-		amount: number | null;
-		asin: string | null;
-		category: string | null;
-	}> = [];
-
-	for (const order of orders) {
-		const orderItems = await ctx.db
-			.query('amazonOrderItems')
-			.withIndex('by_amazonOrderId', (q) => q.eq('amazonOrderId', order._id))
-			.take(20);
-		for (const item of orderItems) {
-			items.push({
-				title: item.title,
-				quantity: item.quantity ?? null,
-				amount: item.amount ?? null,
-				asin: item.asin ?? null,
-				category: item.category ?? null
-			});
+	opts: { startDate?: string; endDate?: string; cap?: number }
+): Promise<{
+	data: ResolutionData;
+	entries: Array<{ transaction: Doc<'transactions'>; line: ResolvedLineItem }>;
+}> {
+	const rows = await ctx.db
+		.query('transactions')
+		.withIndex('by_date', (q) => {
+			if (opts.startDate && opts.endDate) return q.gte('date', opts.startDate).lte('date', opts.endDate);
+			if (opts.startDate) return q.gte('date', opts.startDate);
+			if (opts.endDate) return q.lte('date', opts.endDate);
+			return q;
+		})
+		.order('desc')
+		.take(opts.cap ?? 2000);
+	const data = await loadResolutionData(ctx);
+	const entries: Array<{ transaction: Doc<'transactions'>; line: ResolvedLineItem }> = [];
+	for (const transaction of rows) {
+		if (transaction.removed) continue;
+		for (const line of resolveTransactionLineItems(transaction, data)) {
+			entries.push({ transaction, line });
 		}
 	}
-
-	return items;
+	return { data, entries };
 }
 
-export const getDynamicDashboard = query({
-	args: {
-		startDate: v.string(),
-		endDate: v.string()
-	},
-	handler: async (ctx, args) => {
-		const rows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) =>
-				q.eq('classification', 'dynamic').gte('date', args.startDate).lte('date', args.endDate)
-			)
-			.order('desc')
-			.take(500);
-		const activeExpenses = rows.filter(
-			(transaction) => !transaction.removed && transaction.kind === 'expense'
-		);
-		const total = activeExpenses.reduce((sum, transaction) => sum + transaction.amount, 0);
-		const names = await categoryNameMap(ctx);
-		const byCategory = summarizeBy(activeExpenses, (transaction) =>
-			categoryLabel(names, transaction.categorySlug)
-		);
-		const byMerchant = summarizeBy(
-			activeExpenses,
-			(transaction) => transaction.merchantName ?? transaction.name
-		);
-		const trend = summarizeBy(activeExpenses, (transaction) => transaction.date.slice(0, 7));
-		const unreviewed = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) =>
-				q.eq('classification', 'unreviewed').gte('date', args.startDate).lte('date', args.endDate)
-			)
-			.take(100);
-
-		return {
-			total,
-			count: activeExpenses.length,
-			byCategory: byCategory.slice(0, 8),
-			byMerchant: byMerchant.slice(0, 8),
-			trend,
-			unreviewedCount: unreviewed.filter((transaction) => !transaction.removed).length,
-			recentTransactions: activeExpenses.slice(0, 12).map((transaction) => ({
-				id: transaction._id,
-				date: transaction.date,
-				name: transaction.name,
-				merchantName: transaction.merchantName ?? null,
-				amount: transaction.amount,
-				category: categoryLabel(names, transaction.categorySlug)
-			}))
-		};
-	}
-});
-
-// Month-over-month dynamic spend, broken into canonical categories. Amazon charges are
-// exploded into their line items so item categories (not the generic "Amazon" bucket) show up.
+// Month-over-month dynamic spend, broken into canonical categories. Every charge is resolved into
+// its line items so item categories (not the generic "Amazon" bucket) show up.
 export const getMonthlyDynamicBreakdown = query({
 	args: {
 		startMonth: v.string(),
@@ -272,29 +206,8 @@ export const getMonthlyDynamicBreakdown = query({
 	handler: async (ctx, args) => {
 		const startDate = `${args.startMonth}-01`;
 		const endDate = lastDayOfMonth(args.endMonth);
-
-		const dynamicRows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) =>
-				q.eq('classification', 'dynamic').gte('date', startDate).lte('date', endDate)
-			)
-			.take(2000);
-		const unreviewedRows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) =>
-				q.eq('classification', 'unreviewed').gte('date', startDate).lte('date', endDate)
-			)
-			.take(2000);
-		const rows = [...dynamicRows, ...unreviewedRows].filter(
-			(transaction) => !transaction.removed && transaction.kind === 'expense'
-		);
-
-		const categories = await ctx.db
-			.query('categories')
-			.withIndex('by_active', (q) => q.eq('active', true))
-			.take(200);
-		const categoryName = new Map(categories.map((category) => [category.slug, category.name]));
-		const nameFor = (slug: string) => categoryName.get(slug) ?? titleCase(slug);
+		const { data, entries } = await resolvedLinesInRange(ctx, { startDate, endDate });
+		const nameFor = (slug: string) => categoryDisplayLabel(data, slug);
 
 		// month -> slug -> total
 		const byMonth = new Map<string, Map<string, number>>();
@@ -310,27 +223,9 @@ export const getMonthlyDynamicBreakdown = query({
 			monthTotals.set(month, (monthTotals.get(month) ?? 0) + amount);
 		};
 
-		for (const transaction of rows) {
-			const month = transaction.date.slice(0, 7);
-
-			if (transaction.normalizedMerchant.includes('amazon')) {
-				const items = await amazonItemsForTransaction(ctx, transaction);
-				if (items.length > 0) {
-					const amountSum = items.reduce((sum, item) => sum + (item.amount ?? 0), 0);
-					for (const item of items) {
-						const slug = item.category ?? 'uncategorized';
-						// Split the charge across items by item price; fall back to an even split.
-						const share =
-							amountSum > 0
-								? transaction.amount * ((item.amount ?? 0) / amountSum)
-								: transaction.amount / items.length;
-						add(month, slug, share);
-					}
-					continue;
-				}
-			}
-
-			add(month, transaction.categorySlug ?? 'uncategorized', transaction.amount);
+		for (const { transaction, line } of entries) {
+			if (line.classification !== 'dynamic' || line.kind !== 'expense') continue;
+			add(transaction.date.slice(0, 7), line.categorySlug, line.allocatedAmount);
 		}
 
 		const months = enumerateMonths(args.startMonth, args.endMonth).map((month) => {
@@ -351,88 +246,133 @@ export const getMonthlyDynamicBreakdown = query({
 	}
 });
 
+// Group resolved lines of one classification into WHERE/WHAT units: item lines (with a sku) group
+// per `(merchant, sku)`; plain lines group per merchant. Reused by the recurring + expected pages.
+function groupLinesByUnit(
+	entries: Array<{ transaction: Doc<'transactions'>; line: ResolvedLineItem }>
+) {
+	const units = new Map<
+		string,
+		{
+			key: string;
+			merchant: string;
+			sku: string | null;
+			normalizedMerchant: string;
+			label: string;
+			total: number;
+			count: number;
+			months: Set<string>;
+		}
+	>();
+	for (const { transaction, line } of entries) {
+		const key = line.sku
+			? `item:${line.merchant}:${line.sku}`
+			: `merchant:${transaction.normalizedMerchant}`;
+		const existing = units.get(key) ?? {
+			key,
+			merchant: line.merchant,
+			sku: line.sku,
+			normalizedMerchant: transaction.normalizedMerchant,
+			label: line.sku ? line.title : (transaction.merchantName ?? transaction.name),
+			total: 0,
+			count: 0,
+			months: new Set<string>()
+		};
+		existing.total += line.allocatedAmount;
+		existing.count += 1;
+		existing.months.add(transaction.date.slice(0, 7));
+		units.set(key, existing);
+	}
+	return [...units.values()].sort((a, b) => b.total - a.total).map((unit) => ({
+		key: unit.key,
+		merchant: unit.merchant,
+		sku: unit.sku,
+		asin: unit.sku,
+		normalizedMerchant: unit.normalizedMerchant,
+		label: unit.label,
+		total: unit.total,
+		count: unit.count,
+		monthly: unit.total / Math.max(unit.months.size, 1)
+	}));
+}
+
 export const getRecurringSummary = query({
 	args: {},
 	handler: async (ctx) => {
-		const rows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) => q.eq('classification', 'known_recurring'))
-			.order('desc')
-			.take(1000);
-		const active = rows.filter((transaction) => !transaction.removed);
-		const expenses = active.filter((transaction) => transaction.kind === 'expense');
-		const total = expenses.reduce((sum, transaction) => sum + transaction.amount, 0);
-		const names = await categoryNameMap(ctx);
-		const byCategory = summarizeBy(expenses, (transaction) =>
-			categoryLabel(names, transaction.categorySlug)
+		const { data, entries } = await resolvedLinesInRange(ctx, { cap: 3000 });
+		const recurring = entries.filter(
+			({ line }) => line.classification === 'known_recurring' && line.kind === 'expense'
 		);
+		const total = recurring.reduce((sum, { line }) => sum + line.allocatedAmount, 0);
 
-		// Amazon recurring is grouped per item (ASIN) rather than lumped under one "amazon" row,
-		// so each Subscribe & Save item is its own recurring entry that can be unmarked on its own.
-		const merchantTotals = new Map<
-			string,
-			{
-				key: string;
-				asin: string | null;
-				normalizedMerchant: string;
-				label: string;
-				total: number;
-				count: number;
-				months: Set<string>;
-			}
-		>();
-		for (const transaction of expenses) {
-			let key = `merchant:${transaction.normalizedMerchant}`;
-			let asin: string | null = null;
-			let label = transaction.merchantName ?? transaction.name;
-
-			if (transaction.normalizedMerchant.includes('amazon')) {
-				const primary = await primaryAsinForTransaction(ctx, transaction._id);
-				if (primary) {
-					key = `asin:${primary.asin}`;
-					asin = primary.asin;
-					label = primary.title;
-				}
-			}
-
-			const existing = merchantTotals.get(key) ?? {
-				key,
-				asin,
-				normalizedMerchant: transaction.normalizedMerchant,
-				label,
+		const categoryTotals = new Map<string, { label: string; total: number; count: number }>();
+		for (const { line } of recurring) {
+			const existing = categoryTotals.get(line.category) ?? {
+				label: line.category,
 				total: 0,
-				count: 0,
-				months: new Set<string>()
+				count: 0
 			};
-			existing.total += transaction.amount;
+			existing.total += line.allocatedAmount;
 			existing.count += 1;
-			existing.months.add(transaction.date.slice(0, 7));
-			merchantTotals.set(key, existing);
+			categoryTotals.set(line.category, existing);
 		}
-		const byMerchant = [...merchantTotals.values()]
-			.sort((a, b) => b.total - a.total)
-			.map((merchant) => ({
-				key: merchant.key,
-				asin: merchant.asin,
-				normalizedMerchant: merchant.normalizedMerchant,
-				label: merchant.label,
-				total: merchant.total,
-				count: merchant.count,
-				monthly: merchant.total / Math.max(merchant.months.size, 1)
-			}));
-		// Recurring monthly cost = sum of each merchant's average per-month spend.
-		const monthlyTotal = byMerchant.reduce((sum, merchant) => sum + merchant.monthly, 0);
+		const byCategory = [...categoryTotals.values()].sort((a, b) => b.total - a.total);
+		const byMerchant = groupLinesByUnit(recurring);
+		const monthlyTotal = byMerchant.reduce((sum, unit) => sum + unit.monthly, 0);
+		const txnIds = new Set(recurring.map(({ transaction }) => transaction._id));
+		void data;
 
 		return {
 			total,
 			monthlyTotal,
-			count: active.length,
-			expenseCount: expenses.length,
+			count: txnIds.size,
+			expenseCount: recurring.length,
 			byCategory: byCategory.slice(0, 12),
 			byMerchant: byMerchant.slice(0, 12)
 		};
 	}
 });
+
+// Group a classification's resolved lines back under their parent transactions, preserving the
+// per-transaction shape the recurring/expected pages render (with itemized lines as `amazonItems`).
+function transactionsForClassification(
+	entries: Array<{ transaction: Doc<'transactions'>; line: ResolvedLineItem }>,
+	classification: Classification
+) {
+	const byTxn = new Map<
+		Id<'transactions'>,
+		{ transaction: Doc<'transactions'>; lines: ResolvedLineItem[] }
+	>();
+	for (const { transaction, line } of entries) {
+		if (line.classification !== classification || line.kind !== 'expense') continue;
+		const existing = byTxn.get(transaction._id) ?? { transaction, lines: [] };
+		existing.lines.push(line);
+		byTxn.set(transaction._id, existing);
+	}
+	return [...byTxn.values()]
+		.sort((a, b) => b.transaction.date.localeCompare(a.transaction.date))
+		.slice(0, 500)
+		.map(({ transaction, lines }) => ({
+			id: transaction._id,
+			date: transaction.date,
+			name: transaction.name,
+			merchantName: transaction.merchantName ?? null,
+			amount: transaction.amount,
+			kind: transaction.kind,
+			pending: transaction.pending,
+			source: transaction.source,
+			// The matching line items, each editable (its category can be changed inline).
+			lineItems: lines.map((line) => ({
+				merchant: line.merchant,
+				orderSource: line.orderSource,
+				sku: line.sku,
+				title: line.title,
+				amount: line.allocatedAmount,
+				categorySlug: line.categorySlug,
+				category: line.category
+			}))
+		}));
+}
 
 export const getRecurringTransactions = query({
 	args: {
@@ -440,80 +380,48 @@ export const getRecurringTransactions = query({
 		endDate: v.optional(v.string())
 	},
 	handler: async (ctx, args) => {
-		const rows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) => {
-				const withClass = q.eq('classification', 'known_recurring');
-				if (args.startDate && args.endDate) {
-					return withClass.gte('date', args.startDate).lte('date', args.endDate);
-				}
-				if (args.startDate) return withClass.gte('date', args.startDate);
-				if (args.endDate) return withClass.lte('date', args.endDate);
-				return withClass;
-			})
-			.order('desc')
-			.take(500);
-
-		const names = await categoryNameMap(ctx);
-		return Promise.all(
-			rows
-				.filter((transaction) => !transaction.removed)
-				.map(async (transaction) => ({
-					id: transaction._id,
-					date: transaction.date,
-					name: transaction.name,
-					merchantName: transaction.merchantName ?? null,
-					amount: transaction.amount,
-					kind: transaction.kind,
-					pending: transaction.pending,
-					category: categoryLabel(names, transaction.categorySlug),
-					classificationSource: transaction.classificationSource,
-					source: transaction.source,
-					amazonItems: await amazonItemsForTransaction(ctx, transaction)
-				}))
-		);
+		const { entries } = await resolvedLinesInRange(ctx, {
+			startDate: args.startDate,
+			endDate: args.endDate,
+			cap: 3000
+		});
+		return transactionsForClassification(entries, 'known_recurring');
 	}
 });
+
+// How many active transactions share a merchant — used for "moved back to dynamic (N)" messaging
+// after deleting a rule. Classification isn't stored, so there's nothing to patch.
+async function countActiveTransactionsForMerchant(ctx: MutationCtx, normalizedMerchant: string) {
+	const rows = await ctx.db
+		.query('transactions')
+		.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
+		.take(500);
+	return rows.filter((transaction) => !transaction.removed).length;
+}
+
+// Delete a merchant rule of the given classification. Classification resolves from rules at read
+// time, so removing the rule is all it takes — no per-transaction fan-out.
+async function deleteMerchantRule(
+	ctx: MutationCtx,
+	normalizedMerchant: string,
+	classification: 'known_recurring' | 'expected' | 'transfer'
+) {
+	const rules = await ctx.db
+		.query('merchantRules')
+		.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', normalizedMerchant))
+		.take(10);
+	for (const rule of rules) {
+		if (rule.classification === classification) await ctx.db.delete(rule._id);
+	}
+	return countActiveTransactionsForMerchant(ctx, normalizedMerchant);
+}
 
 export const unmarkRecurring = mutation({
 	args: {
 		normalizedMerchant: v.string()
 	},
 	handler: async (ctx, args) => {
-		const now = Date.now();
-		const rules = await ctx.db
-			.query('merchantRules')
-			.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', args.normalizedMerchant))
-			.take(10);
-
-		for (const rule of rules) {
-			if (rule.classification === 'known_recurring') {
-				await ctx.db.delete(rule._id);
-			}
-		}
-
-		const matchingTransactions = await ctx.db
-			.query('transactions')
-			.withIndex('by_normalizedMerchant', (q) =>
-				q.eq('normalizedMerchant', args.normalizedMerchant)
-			)
-			.take(500);
-		let updated = 0;
-
-		for (const matchingTransaction of matchingTransactions) {
-			if (matchingTransaction.removed) continue;
-			if (matchingTransaction.classification !== 'known_recurring') continue;
-
-			await ctx.db.patch(matchingTransaction._id, {
-				classification: 'dynamic',
-				classificationSource: 'default',
-				classificationConfidence: undefined,
-				reviewedAt: now,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
+		const updated = await deleteMerchantRule(ctx, args.normalizedMerchant, 'known_recurring');
 		return { ok: true, merchant: args.normalizedMerchant, updated };
 	}
 });
@@ -524,66 +432,58 @@ export const unmarkRecurring = mutation({
 export const getExpectedSummary = query({
 	args: {},
 	handler: async (ctx) => {
-		const merchantRules = await ctx.db
-			.query('merchantRules')
-			.withIndex('by_active', (q) => q.eq('active', true))
-			.take(500);
-		const byMerchant = [];
-		for (const rule of merchantRules) {
-			if (rule.classification !== 'expected') continue;
-			const rows = await ctx.db
-				.query('transactions')
-				.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', rule.normalizedPattern))
-				.take(500);
-			const expenses = rows.filter(
-				(transaction) =>
-					!transaction.removed &&
-					transaction.classification === 'expected' &&
-					transaction.kind === 'expense'
-			);
-			const total = expenses.reduce((sum, transaction) => sum + transaction.amount, 0);
-			const months = new Set(expenses.map((transaction) => transaction.date.slice(0, 7)));
-			byMerchant.push({
-				key: rule.normalizedPattern,
-				normalizedMerchant: rule.normalizedPattern,
-				label: rule.pattern,
-				total,
-				count: expenses.length,
-				monthly: total / Math.max(months.size, 1)
-			});
-		}
-		byMerchant.sort((a, b) => b.total - a.total);
+		const { data, entries } = await resolvedLinesInRange(ctx, { cap: 3000 });
+		const expected = entries.filter(
+			({ line }) => line.classification === 'expected' && line.kind === 'expense'
+		);
 
-		const categories = await ctx.db
-			.query('categories')
-			.withIndex('by_active', (q) => q.eq('active', true))
-			.take(200);
-		const byCategory = [];
-		for (const category of categories) {
-			if (category.treatment !== 'expected') continue;
-			const rows = await ctx.db
-				.query('transactions')
-				.withIndex('by_categorySlug', (q) => q.eq('categorySlug', category.slug))
-				.take(1000);
-			const expenses = rows.filter(
-				(transaction) =>
-					!transaction.removed &&
-					transaction.classification === 'expected' &&
-					transaction.kind === 'expense'
-			);
-			const total = expenses.reduce((sum, transaction) => sum + transaction.amount, 0);
-			const months = new Set(expenses.map((transaction) => transaction.date.slice(0, 7)));
-			byCategory.push({
-				key: category.slug,
-				slug: category.slug,
-				categoryId: category._id,
-				label: category.name,
-				total,
-				count: expenses.length,
-				monthly: total / Math.max(months.size, 1)
-			});
+		// Expected via a merchant/item rule → the "by merchant" list (unmark by deleting the rule).
+		const byMerchant = groupLinesByUnit(
+			expected.filter(({ line }) => line.classificationSource !== 'category')
+		);
+
+		// Expected via a category's treatment → the "by category" list (unmark by clearing treatment).
+		const categorySlugToId = new Map(
+			(
+				await ctx.db
+					.query('categories')
+					.withIndex('by_active', (q) => q.eq('active', true))
+					.take(200)
+			).map((category) => [category.slug, category._id])
+		);
+		const categoryUnits = new Map<
+			string,
+			{ slug: string; label: string; total: number; count: number; months: Set<string> }
+		>();
+		for (const { transaction, line } of expected) {
+			if (line.classificationSource !== 'category') continue;
+			const existing = categoryUnits.get(line.categorySlug) ?? {
+				slug: line.categorySlug,
+				label: line.category,
+				total: 0,
+				count: 0,
+				months: new Set<string>()
+			};
+			existing.total += line.allocatedAmount;
+			existing.count += 1;
+			existing.months.add(transaction.date.slice(0, 7));
+			categoryUnits.set(line.categorySlug, existing);
 		}
-		byCategory.sort((a, b) => b.total - a.total);
+		const byCategory = [...categoryUnits.values()]
+			.sort((a, b) => b.total - a.total)
+			.map((unit) => ({
+				key: unit.slug,
+				slug: unit.slug,
+				categoryId: categorySlugToId.get(unit.slug) ?? null,
+				label: unit.label,
+				total: unit.total,
+				count: unit.count,
+				monthly: unit.total / Math.max(unit.months.size, 1)
+			}));
+
+		// Merchants ignored as transfers (non-spending, e.g. credit-card payments). Unmark by
+		// deleting the transfer rule.
+		const byTransfer = groupLinesByUnit(entries.filter(({ line }) => line.kind === 'transfer'));
 
 		const monthlyTotal =
 			byMerchant.reduce((sum, row) => sum + row.monthly, 0) +
@@ -594,6 +494,7 @@ export const getExpectedSummary = query({
 		const count =
 			byMerchant.reduce((sum, row) => sum + row.count, 0) +
 			byCategory.reduce((sum, row) => sum + row.count, 0);
+		void data;
 
 		return {
 			total,
@@ -601,8 +502,10 @@ export const getExpectedSummary = query({
 			count,
 			merchantCount: byMerchant.length,
 			categoryCount: byCategory.length,
+			transferCount: byTransfer.length,
 			byMerchant,
-			byCategory
+			byCategory,
+			byTransfer
 		};
 	}
 });
@@ -613,38 +516,12 @@ export const getExpectedTransactions = query({
 		endDate: v.optional(v.string())
 	},
 	handler: async (ctx, args) => {
-		const rows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) => {
-				const withClass = q.eq('classification', 'expected');
-				if (args.startDate && args.endDate) {
-					return withClass.gte('date', args.startDate).lte('date', args.endDate);
-				}
-				if (args.startDate) return withClass.gte('date', args.startDate);
-				if (args.endDate) return withClass.lte('date', args.endDate);
-				return withClass;
-			})
-			.order('desc')
-			.take(500);
-
-		const names = await categoryNameMap(ctx);
-		return Promise.all(
-			rows
-				.filter((transaction) => !transaction.removed)
-				.map(async (transaction) => ({
-					id: transaction._id,
-					date: transaction.date,
-					name: transaction.name,
-					merchantName: transaction.merchantName ?? null,
-					amount: transaction.amount,
-					kind: transaction.kind,
-					pending: transaction.pending,
-					category: categoryLabel(names, transaction.categorySlug),
-					classificationSource: transaction.classificationSource,
-					source: transaction.source,
-					amazonItems: await amazonItemsForTransaction(ctx, transaction)
-				}))
-		);
+		const { entries } = await resolvedLinesInRange(ctx, {
+			startDate: args.startDate,
+			endDate: args.endDate,
+			cap: 3000
+		});
+		return transactionsForClassification(entries, 'expected');
 	}
 });
 
@@ -653,40 +530,17 @@ export const unmarkExpectedMerchant = mutation({
 		normalizedMerchant: v.string()
 	},
 	handler: async (ctx, args) => {
-		const now = Date.now();
-		const rules = await ctx.db
-			.query('merchantRules')
-			.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', args.normalizedMerchant))
-			.take(10);
+		const updated = await deleteMerchantRule(ctx, args.normalizedMerchant, 'expected');
+		return { ok: true, merchant: args.normalizedMerchant, updated };
+	}
+});
 
-		for (const rule of rules) {
-			if (rule.classification === 'expected') {
-				await ctx.db.delete(rule._id);
-			}
-		}
-
-		const matchingTransactions = await ctx.db
-			.query('transactions')
-			.withIndex('by_normalizedMerchant', (q) =>
-				q.eq('normalizedMerchant', args.normalizedMerchant)
-			)
-			.take(500);
-		let updated = 0;
-
-		for (const matchingTransaction of matchingTransactions) {
-			if (matchingTransaction.removed) continue;
-			if (matchingTransaction.classification !== 'expected') continue;
-
-			await ctx.db.patch(matchingTransaction._id, {
-				classification: 'dynamic',
-				classificationSource: 'default',
-				classificationConfidence: undefined,
-				reviewedAt: now,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
+export const unmarkTransferMerchant = mutation({
+	args: {
+		normalizedMerchant: v.string()
+	},
+	handler: async (ctx, args) => {
+		const updated = await deleteMerchantRule(ctx, args.normalizedMerchant, 'transfer');
 		return { ok: true, merchant: args.normalizedMerchant, updated };
 	}
 });
@@ -694,18 +548,17 @@ export const unmarkExpectedMerchant = mutation({
 // Unmarking an expected category is just clearing its treatment — see
 // `categories.setCategoryTreatment`, which the Expected page calls with `treatment: null`.
 
+// Mark the merchant (WHERE) of a transaction as expected/recurring: upsert a merchant rule. No
+// fan-out — every line resolves its classification from this rule at read time.
 export const markTransaction = mutation({
 	args: {
 		transactionId: v.id('transactions'),
-		classification: manualTransactionClassification,
-		notes: v.optional(v.string()),
-		createMerchantRule: v.optional(v.boolean()),
+		classification: merchantMarkClassification,
 		ruleMatchType: v.optional(v.union(v.literal('exact'), v.literal('contains')))
 	},
 	handler: async (ctx, args) => {
 		const now = Date.now();
 		const transaction = await ctx.db.get(args.transactionId);
-
 		if (!transaction || transaction.removed) {
 			throw new Error('Transaction is not available for marking.');
 		}
@@ -718,8 +571,6 @@ export const markTransaction = mutation({
 				.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', normalizedPattern))
 				.take(1)
 		)[0];
-		// Merchant rules carry only the classification — the category is owned by the canonical
-		// AI taxonomy (categorySlug), never a Plaid string threaded through here.
 		const ruleDoc = {
 			matchType: args.ruleMatchType ?? ('exact' as const),
 			pattern,
@@ -728,152 +579,127 @@ export const markTransaction = mutation({
 			active: true,
 			updatedAt: now
 		};
-
 		if (existingRule) {
 			await ctx.db.patch(existingRule._id, ruleDoc);
 		} else {
-			await ctx.db.insert('merchantRules', {
-				...ruleDoc,
-				createdAt: now
-			});
+			await ctx.db.insert('merchantRules', { ...ruleDoc, createdAt: now });
 		}
 
-		const matchingTransactions = await ctx.db
-			.query('transactions')
-			.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedPattern))
-			.take(200);
-		let updated = 0;
-
-		for (const matchingTransaction of matchingTransactions) {
-			if (matchingTransaction.removed) continue;
-
-			await ctx.db.patch(matchingTransaction._id, {
-				classification: args.classification,
-				classificationSource: 'merchant_rule',
-				classificationConfidence: 1,
-				notes: normalizeOptionalText(args.notes),
-				reviewedAt: now,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
+		const updated = await countActiveTransactionsForMerchant(ctx, normalizedPattern);
 		return { ok: true, merchant: normalizedPattern, updated };
 	}
 });
 
-// Set a treatment on the canonical (AI) category that a transaction belongs to, then reclassify
-// every transaction in that category. Keyed on `categorySlug`, never the Plaid provider category.
-async function markCategoryTreatment(
-	ctx: MutationCtx,
-	transactionId: Id<'transactions'>,
-	treatment: 'expected' | 'transfer'
-) {
-	const transaction = await ctx.db.get(transactionId);
-
-	if (!transaction || transaction.removed) {
-		throw new Error('Transaction is not available for marking.');
-	}
-
-	const slug = transaction.categorySlug;
-	if (!slug) {
-		throw new Error('Categorize this transaction first, then mark its category.');
-	}
-
-	const category = await ctx.db
-		.query('categories')
-		.withIndex('by_slug', (q) => q.eq('slug', slug))
-		.unique();
-	if (!category) {
-		throw new Error("This transaction's category no longer exists.");
-	}
-
-	await ctx.db.patch(category._id, { treatment, updatedAt: Date.now() });
-	const updated = await reclassifyCategoryTransactions(ctx, slug, treatment);
-
-	return { ok: true as const, category: category.name, slug, updated };
-}
-
-export const markCategoryExpected = mutation({
-	args: { transactionId: v.id('transactions') },
-	handler: (ctx, args) => markCategoryTreatment(ctx, args.transactionId, 'expected')
-});
-
-export const markCategoryTransfer = mutation({
-	args: { transactionId: v.id('transactions') },
-	handler: (ctx, args) => markCategoryTreatment(ctx, args.transactionId, 'transfer')
-});
-
-// Manually assign a canonical category to an uncategorized transaction. This also (a) remembers
-// the merchant -> category mapping so future syncs inherit it without an AI call, and (b) applies
-// the destination category's treatment (e.g. `expected`) to the merchant's transactions right away.
-export const setTransactionCategory = mutation({
+// Mark an item (WHAT) of a transaction as expected/recurring: upsert an item rule keyed on
+// `(merchant, sku)`. Only sku-bearing lines (e.g. Amazon items) can have item rules.
+export const markLineItem = mutation({
 	args: {
-		transactionId: v.id('transactions'),
-		categorySlug: v.string()
+		merchant: v.string(),
+		sku: v.string(),
+		title: v.optional(v.string()),
+		classification: manualTransactionClassification
 	},
 	handler: async (ctx, args) => {
 		const now = Date.now();
-		const transaction = await ctx.db.get(args.transactionId);
-
-		if (!transaction || transaction.removed) {
-			throw new Error('Transaction is not available for categorizing.');
+		const existing = await ctx.db
+			.query('itemRules')
+			.withIndex('by_merchant_sku', (q) => q.eq('merchant', args.merchant).eq('sku', args.sku))
+			.unique();
+		const ruleDoc = {
+			merchant: args.merchant,
+			sku: args.sku,
+			title: args.title,
+			classification: args.classification,
+			active: true,
+			updatedAt: now
+		};
+		if (existing) {
+			await ctx.db.patch(existing._id, ruleDoc);
+		} else {
+			await ctx.db.insert('itemRules', { ...ruleDoc, createdAt: now });
 		}
+		return { ok: true, updated: await countTransactionsForSku(ctx, args.sku) };
+	}
+});
 
+export const unmarkLineItem = mutation({
+	args: { merchant: v.string(), sku: v.string() },
+	handler: async (ctx, args) => {
+		const rule = await ctx.db
+			.query('itemRules')
+			.withIndex('by_merchant_sku', (q) => q.eq('merchant', args.merchant).eq('sku', args.sku))
+			.unique();
+		if (rule) await ctx.db.delete(rule._id);
+		return { ok: true, updated: await countTransactionsForSku(ctx, args.sku) };
+	}
+});
+
+// How many matched transactions contain a given sku — for "moved back to dynamic (N)" messaging.
+async function countTransactionsForSku(ctx: MutationCtx, sku: string) {
+	const items = await ctx.db
+		.query('orderItems')
+		.withIndex('by_sku', (q) => q.eq('sku', sku))
+		.take(500);
+	const txnIds = new Set<Id<'transactions'>>();
+	for (const item of items) {
+		const order = await ctx.db.get(item.orderId);
+		if (order?.matchedTransactionId) txnIds.add(order.matchedTransactionId);
+	}
+	return txnIds.size;
+}
+
+// Mark a canonical category as expected/transfer by setting its treatment. Every line in the
+// category resolves to that treatment at read time — no fan-out.
+async function setCategoryTreatmentBySlug(
+	ctx: MutationCtx,
+	categorySlug: string,
+	treatment: 'expected' | 'transfer'
+) {
+	if (!categorySlug || categorySlug === 'uncategorized') {
+		throw new Error('Categorize this first, then mark its category.');
+	}
+	const category = await ctx.db
+		.query('categories')
+		.withIndex('by_slug', (q) => q.eq('slug', categorySlug))
+		.unique();
+	if (!category) throw new Error('Category not found.');
+	await ctx.db.patch(category._id, { treatment, updatedAt: Date.now() });
+	return { ok: true as const, category: category.name, slug: categorySlug };
+}
+
+export const markCategoryExpected = mutation({
+	args: { categorySlug: v.string() },
+	handler: (ctx, args) => setCategoryTreatmentBySlug(ctx, args.categorySlug, 'expected')
+});
+
+// Manually assign a canonical category to a line item. A sku-bearing line writes the item cache
+// `(merchant, sku)`; a plain Plaid line writes the merchant cache. Manual picks outrank AI and
+// fan automatically: every line sharing that key resolves to the new category on the next read.
+export const setLineItemCategory = mutation({
+	args: {
+		merchant: v.string(),
+		sku: v.optional(v.string()),
+		categorySlug: v.string()
+	},
+	handler: async (ctx, args) => {
 		const category = await ctx.db
 			.query('categories')
 			.withIndex('by_slug', (q) => q.eq('slug', args.categorySlug))
 			.unique();
-		if (!category || !category.active) {
-			throw new Error('Category not found.');
-		}
+		if (!category || !category.active) throw new Error('Category not found.');
 
-		const normalizedMerchant = transaction.normalizedMerchant;
-
-		// Remember this merchant -> category for the future. A manual pick overwrites any cached AI
-		// guess and is inherited by later syncs (see `upsertTransaction`).
-		const existingCache = await ctx.db
-			.query('merchantCategories')
-			.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
-			.unique();
-		const cacheDoc = {
-			normalizedMerchant,
-			categorySlug: args.categorySlug,
-			source: 'manual' as const,
-			active: true,
-			updatedAt: now
-		};
-		if (existingCache) {
-			await ctx.db.patch(existingCache._id, cacheDoc);
+		if (args.sku) {
+			await applyItemCategory(ctx, args.merchant, args.sku, args.categorySlug, { source: 'manual' });
 		} else {
-			await ctx.db.insert('merchantCategories', { ...cacheDoc, createdAt: now });
+			await applyMerchantCategory(ctx, args.merchant, args.categorySlug, { source: 'manual' });
 		}
 
-		// Fan the slug out to every transaction from this merchant. If the destination category is
-		// `expected`/`transfer`, its treatment classifies the ones the category owns (default- or
-		// category-rule-classified) — manual marks and merchant rules still outrank it.
-		const treatment = category.treatment ?? null;
-		const matching = await ctx.db
-			.query('transactions')
-			.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
-			.take(500);
-		let updated = 0;
-		for (const row of matching) {
-			if (row.removed) continue;
-			const classificationPatch =
-				treatment && CATEGORY_OWNED_SOURCES.has(row.classificationSource)
-					? { ...treatmentPatch(treatment), reviewedAt: now }
-					: {};
-			await ctx.db.patch(row._id, {
-				categorySlug: args.categorySlug,
-				categorySource: 'manual',
-				...classificationPatch,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
-		return { ok: true, category: category.name, slug: args.categorySlug, treatment, updated };
+		return {
+			ok: true,
+			category: category.name,
+			slug: args.categorySlug,
+			treatment: category.treatment ?? null
+		};
 	}
 });
 
@@ -1090,7 +916,6 @@ async function upsertTransaction(
 		pending: boolean;
 		categoryPrimary?: string;
 		categoryDetailed?: string;
-		raw: unknown;
 	},
 	now: number
 ) {
@@ -1123,108 +948,40 @@ async function upsertTransaction(
 		categoryDetailed: transaction.categoryDetailed,
 		updatedAt: now
 	};
-	let transactionDocId: Id<'transactions'>;
 
+	// A transaction is just the WHERE + money now. Category and classification are resolved at read
+	// time from the rule/cache tables, so there's nothing classification-related to preserve or seed.
 	if (existing) {
-		// Preserve the existing classification and kind on re-sync so a Plaid "modified" record
-		// can't wipe a manual mark, a category-rule transfer, or an Amazon ASIN-rule result.
-		const { kind: _kind, ...preservedDoc } = baseDoc;
-		await ctx.db.patch(existing._id, preservedDoc);
-		transactionDocId = existing._id;
+		await ctx.db.patch(existing._id, baseDoc);
 	} else {
-		const classification = await classifyFromRules(ctx, transaction.normalizedMerchant);
-		// Inherit a previously-resolved AI category for this merchant so re-syncs don't re-hit the AI.
-		const cachedCategory = await ctx.db
-			.query('merchantCategories')
-			.withIndex('by_normalizedMerchant', (q) =>
-				q.eq('normalizedMerchant', transaction.normalizedMerchant)
-			)
-			.unique();
-		// When inheriting a cached category, let that category's treatment classify the transaction —
-		// unless a merchant rule already claimed it (merchant rules outrank category treatment).
-		let categoryClassification = {};
-		if (cachedCategory && classification.classificationSource === 'default') {
-			const category = await ctx.db
-				.query('categories')
-				.withIndex('by_slug', (q) => q.eq('slug', cachedCategory.categorySlug))
-				.unique();
-			if (category?.treatment) {
-				categoryClassification = treatmentPatch(category.treatment);
-			}
-		}
-		transactionDocId = await ctx.db.insert('transactions', {
-			...baseDoc,
-			...classification,
-			...(cachedCategory
-				? { categorySlug: cachedCategory.categorySlug, categorySource: 'ai' as const }
-				: {}),
-			...categoryClassification,
-			importedAt: now
-		});
-	}
-
-	const existingSource = await ctx.db
-		.query('transactionSources')
-		.withIndex('by_source_and_providerId', (q) =>
-			q.eq('source', 'plaid').eq('providerId', transaction.transactionId)
-		)
-		.unique();
-
-	if (existingSource) {
-		await ctx.db.patch(existingSource._id, {
-			transactionId: transactionDocId,
-			raw: transaction.raw,
-			updatedAt: now
-		});
-	} else {
-		await ctx.db.insert('transactionSources', {
-			source: 'plaid',
-			providerId: transaction.transactionId,
-			transactionId: transactionDocId,
-			raw: transaction.raw,
-			importedAt: now,
-			updatedAt: now
-		});
+		await ctx.db.insert('transactions', { ...baseDoc, importedAt: now });
 	}
 }
 
+// Recent transactions in a date range for the review queue. Classification is resolved by the
+// caller (per line item); this just fetches candidate charges and applies the text search.
 async function readTransactions(
 	ctx: QueryCtx,
 	args: {
 		limit: number;
-		classification?: 'known_recurring' | 'expected' | 'dynamic' | 'unreviewed';
 		startDate?: string;
 		endDate?: string;
 		search?: string;
 	}
 ) {
 	const takeLimit = args.search ? Math.min(args.limit * 4, 200) : args.limit;
-	const rows = args.classification
-		? await ctx.db
-				.query('transactions')
-				.withIndex('by_classification_and_date', (q) => {
-					const withClass = q.eq('classification', args.classification!);
-					if (args.startDate && args.endDate) {
-						return withClass.gte('date', args.startDate).lte('date', args.endDate);
-					}
-					if (args.startDate) return withClass.gte('date', args.startDate);
-					if (args.endDate) return withClass.lte('date', args.endDate);
-					return withClass;
-				})
-				.order('desc')
-				.take(takeLimit)
-		: await ctx.db
-				.query('transactions')
-				.withIndex('by_date', (q) => {
-					if (args.startDate && args.endDate) {
-						return q.gte('date', args.startDate).lte('date', args.endDate);
-					}
-					if (args.startDate) return q.gte('date', args.startDate);
-					if (args.endDate) return q.lte('date', args.endDate);
-					return q;
-				})
-				.order('desc')
-				.take(takeLimit);
+	const rows = await ctx.db
+		.query('transactions')
+		.withIndex('by_date', (q) => {
+			if (args.startDate && args.endDate) {
+				return q.gte('date', args.startDate).lte('date', args.endDate);
+			}
+			if (args.startDate) return q.gte('date', args.startDate);
+			if (args.endDate) return q.lte('date', args.endDate);
+			return q;
+		})
+		.order('desc')
+		.take(takeLimit);
 
 	const activeRows = rows.filter((transaction) => !transaction.removed);
 	const term = args.search?.trim().toLowerCase();
@@ -1238,60 +995,12 @@ async function readTransactions(
 				transaction.normalizedMerchant,
 				transaction.categoryPrimary,
 				transaction.categoryDetailed,
-				transaction.userCategory,
 				transaction.notes
 			]
 				.filter(Boolean)
 				.some((value) => value!.toLowerCase().includes(term))
 		)
 		.slice(0, args.limit);
-}
-
-// Sync-time classification from merchant rules only. Category-driven classification (expected /
-// transfer) is applied later, keyed on the canonical AI category once the transaction is
-// categorized — never on the Plaid provider category.
-async function classifyFromRules(ctx: MutationCtx, normalizedMerchant: string) {
-	const merchantRules = await ctx.db
-		.query('merchantRules')
-		.withIndex('by_active', (q) => q.eq('active', true))
-		.take(200);
-	const merchantRule = merchantRules.find((rule) => {
-		if (rule.matchType === 'exact') return normalizedMerchant === rule.normalizedPattern;
-		return normalizedMerchant.includes(rule.normalizedPattern);
-	});
-
-	if (merchantRule) {
-		return {
-			classification: merchantRule.classification,
-			classificationSource: 'merchant_rule' as const,
-			classificationConfidence: 1
-		};
-	}
-
-	return {
-		classification: 'dynamic' as const,
-		classificationSource: 'default' as const,
-		classificationConfidence: undefined
-	};
-}
-
-function summarizeBy<T>(rows: T[], keyFor: (row: T) => string) {
-	const totals = new Map<string, { label: string; total: number; count: number }>();
-
-	for (const row of rows as Array<T & { amount: number }>) {
-		const label = keyFor(row);
-		const existing = totals.get(label) ?? { label, total: 0, count: 0 };
-		existing.total += row.amount;
-		existing.count += 1;
-		totals.set(label, existing);
-	}
-
-	return [...totals.values()].sort((a, b) => b.total - a.total);
-}
-
-function normalizeOptionalText(value?: string) {
-	const normalized = value?.trim();
-	return normalized ? normalized : undefined;
 }
 
 function lastDayOfMonth(month: string) {
@@ -1315,26 +1024,4 @@ function enumerateMonths(startMonth: string, endMonth: string) {
 		}
 	}
 	return months;
-}
-
-function titleCase(slug: string) {
-	return slug
-		.split('-')
-		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-		.join(' ');
-}
-
-// Canonical slug -> display name, loaded once per query. The category shown anywhere is derived
-// only from the AI taxonomy (categorySlug); Plaid provider categories are never displayed.
-async function categoryNameMap(ctx: QueryCtx) {
-	const categories = await ctx.db
-		.query('categories')
-		.withIndex('by_active', (q) => q.eq('active', true))
-		.take(200);
-	return new Map(categories.map((category) => [category.slug, category.name]));
-}
-
-function categoryLabel(names: Map<string, string>, slug?: string | null) {
-	if (!slug || slug === 'uncategorized') return 'Uncategorized';
-	return names.get(slug) ?? titleCase(slug);
 }

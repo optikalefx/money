@@ -13,7 +13,7 @@ const CHUNK_SIZE = 75;
 
 type Unit =
 	| { kind: 'merchant'; normalizedMerchant: string; name: string; plaidCategory: string }
-	| { kind: 'asin'; asin: string; title: string };
+	| { kind: 'item'; merchant: string; sku: string; title: string };
 
 // Resolve a provider-agnostic model handle. API keys come from the Convex environment
 // (OPENAI_API_KEY / ANTHROPIC_API_KEY).
@@ -50,42 +50,31 @@ export const categorizeTransactions = action({
 		applied: number;
 		cacheApplied: number;
 		merchantUnits: number;
-		asinUnits: number;
+		itemUnits: number;
 		chunks: number;
 	}> => {
 		const input = await ctx.runQuery(internal.categories.getCategorizationInput, {
 			force: args.force ?? false
 		});
 
-		// Merchants/ASINs that already have a cached category but still have uncategorized
-		// transactions: apply the cached slug directly, no AI call needed.
-		let cacheApplied = 0;
-		if (input.cachedMerchants.length > 0 || input.cachedAsins.length > 0) {
-			const res = await ctx.runMutation(internal.categories.saveCategoryAssignments, {
-				merchants: input.cachedMerchants,
-				asins: input.cachedAsins
-			});
-			cacheApplied = res.applied;
-			console.log(
-				`[categorize] applied cached categories to ${cacheApplied} record(s) from ` +
-					`${input.cachedMerchants.length} merchant(s) + ${input.cachedAsins.length} ASIN(s).`
-			);
-		}
+		// The cache is the category assignment (resolved at read time), so there is no separate
+		// "apply cached slug to records" step any more.
+		const cacheApplied = 0;
 
 		const units: Unit[] = [
 			...input.merchantUnits.map((m) => ({ kind: 'merchant' as const, ...m })),
-			...input.asinUnits.map((a) => ({ kind: 'asin' as const, ...a }))
+			...input.itemUnits.map((i) => ({ kind: 'item' as const, ...i }))
 		];
 
 		if (units.length === 0) {
-			console.log('[categorize] no new merchants/ASINs need the AI.');
+			console.log('[categorize] no new merchants/items need the AI.');
 			return {
 				categorized: 0,
 				skipped: 0,
 				applied: cacheApplied,
 				cacheApplied,
 				merchantUnits: 0,
-				asinUnits: 0,
+				itemUnits: 0,
 				chunks: 0
 			};
 		}
@@ -108,7 +97,7 @@ export const categorizeTransactions = action({
 		);
 		console.log(
 			`[categorize] model=${modelLabel} · ${input.merchantUnits.length} merchants + ` +
-				`${input.asinUnits.length} ASINs = ${units.length} distinct units in ${groups.length} chunk(s).`
+				`${input.itemUnits.length} items = ${units.length} distinct units in ${groups.length} chunk(s).`
 		);
 
 		// Map each global unit index -> chosen slug (clamped to a known category).
@@ -121,7 +110,7 @@ export const categorizeTransactions = action({
 					const plaid = unit.plaidCategory ? `, plaid category "${unit.plaidCategory}"` : '';
 					return `${index}. [merchant] "${unit.name}"${plaid}`;
 				}
-				return `${index}. [amazon item] "${unit.title}"`;
+				return `${index}. [item] "${unit.title}"`;
 			});
 
 			const prompt =
@@ -154,9 +143,9 @@ export const categorizeTransactions = action({
 			}
 		}
 
-		// Fold assignments back into merchant/ASIN buckets for a single write.
+		// Fold assignments back into merchant/item buckets for a single write.
 		const merchants: Array<{ normalizedMerchant: string; categorySlug: string }> = [];
-		const asins: Array<{ asin: string; title?: string; categorySlug: string }> = [];
+		const items: Array<{ merchant: string; sku: string; title?: string; categorySlug: string }> = [];
 		let categorized = 0;
 		let skipped = 0;
 
@@ -170,26 +159,24 @@ export const categorizeTransactions = action({
 			if (unit.kind === 'merchant') {
 				merchants.push({ normalizedMerchant: unit.normalizedMerchant, categorySlug: slug });
 			} else {
-				asins.push({ asin: unit.asin, title: unit.title, categorySlug: slug });
+				items.push({ merchant: unit.merchant, sku: unit.sku, title: unit.title, categorySlug: slug });
 			}
 		});
 
 		const { applied } = await ctx.runMutation(internal.categories.saveCategoryAssignments, {
 			model: modelLabel,
 			merchants,
-			asins
+			items
 		});
 
-		console.log(
-			`[categorize] done — ${categorized} units categorized, applied to ${applied} record(s).`
-		);
+		console.log(`[categorize] done — ${categorized} units categorized (${applied} cached).`);
 		return {
 			categorized,
 			skipped,
 			applied: applied + cacheApplied,
 			cacheApplied,
 			merchantUnits: input.merchantUnits.length,
-			asinUnits: input.asinUnits.length,
+			itemUnits: input.itemUnits.length,
 			chunks: groups.length
 		};
 	}
@@ -227,7 +214,7 @@ export const suggestCategories = action({
 		const lines = units.map((unit, index) =>
 			unit.kind === 'merchant'
 				? `${index}. [merchant] "${unit.name}"${unit.plaidCategory ? ` (plaid: ${unit.plaidCategory})` : ''} — seen ${unit.weight}x`
-				: `${index}. [amazon item] "${unit.title}" — bought ${unit.weight}x`
+				: `${index}. [item] "${unit.title}" — bought ${unit.weight}x`
 		);
 
 		const schema = z.object({
@@ -270,7 +257,13 @@ export const suggestCategories = action({
 				slug: string;
 				name: string;
 				description: string;
-				members: Array<{ kind: 'merchant' | 'asin'; key: string; title?: string; weight: number }>;
+				members: Array<{
+					kind: 'merchant' | 'item';
+					key: string;
+					merchant?: string;
+					title?: string;
+					weight: number;
+				}>;
 			}
 		>();
 		for (const category of object.categories) {
@@ -291,6 +284,7 @@ export const suggestCategories = action({
 			proposal.members.push({
 				kind: unit.kind,
 				key: unit.key,
+				merchant: unit.kind === 'item' ? unit.merchant : undefined,
 				title: unit.kind === 'merchant' ? unit.name : unit.title,
 				weight: unit.weight
 			});

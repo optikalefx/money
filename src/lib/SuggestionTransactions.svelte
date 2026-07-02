@@ -11,6 +11,13 @@
 	function formatAmount(amount: number | null) {
 		return amount === null ? '—' : currency.format(amount);
 	}
+
+	function statusLabel(status: 'recurring' | 'expected' | 'transfer' | null) {
+		if (status === 'recurring') return 'Recurring';
+		if (status === 'expected') return 'Expected';
+		if (status === 'transfer') return 'Transfer';
+		return '';
+	}
 </script>
 
 <div class="txn-panel">
@@ -21,6 +28,7 @@
 			<span class="txn-date">Date</span>
 			<span class="txn-name">Transaction</span>
 			<span class="txn-merchant">Merchant</span>
+			<span class="txn-status">Status</span>
 			<span class="txn-amount">Amount</span>
 		</div>
 		<ul class="txn-list">
@@ -29,6 +37,11 @@
 					<span class="txn-date">{txn.date || '—'}</span>
 					<span class="txn-name">{txn.name}</span>
 					<span class="txn-merchant">{txn.merchant}</span>
+					<span class="txn-status">
+						{#if txn.status}
+							<span class="status-chip status-{txn.status}">{statusLabel(txn.status)}</span>
+						{/if}
+					</span>
 					<span class="txn-amount">{formatAmount(txn.amount)}</span>
 				</li>
 			{/each}
@@ -47,7 +60,7 @@
 
 	.txn-head {
 		display: grid;
-		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) auto;
+		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) 6rem 6rem;
 		gap: 0.75rem;
 		padding: 0 0 0.35rem;
 		border-bottom: 1px solid rgb(222 216 207 / 70%);
@@ -72,9 +85,9 @@
 
 	.txn-row {
 		display: grid;
-		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) auto;
+		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) 6rem 6rem;
 		gap: 0.75rem;
-		align-items: baseline;
+		align-items: center;
 		padding: 0.3rem 0;
 		border-bottom: 1px solid rgb(222 216 207 / 40%);
 		font-size: 0.85rem;
@@ -109,6 +122,32 @@
 		white-space: nowrap;
 	}
 
+	.status-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.15rem 0.5rem;
+		border-radius: var(--radius-pill);
+		font-size: 0.72rem;
+		font-weight: 800;
+		line-height: 1.2;
+		white-space: nowrap;
+	}
+
+	.status-recurring {
+		color: var(--color-primary);
+		background: rgb(93 112 82 / 14%);
+	}
+
+	.status-expected {
+		color: var(--color-secondary);
+		background: rgb(193 140 93 / 16%);
+	}
+
+	.status-transfer {
+		color: var(--color-muted-foreground);
+		background: rgb(82 76 68 / 12%);
+	}
+
 	.txn-empty {
 		margin: 0;
 		color: var(--color-muted-foreground);
@@ -126,7 +165,8 @@
 		}
 
 		.txn-date,
-		.txn-merchant {
+		.txn-merchant,
+		.txn-status {
 			grid-column: 1;
 		}
 

@@ -61,7 +61,6 @@ type MappedPlaidTransaction = {
 	pending: boolean;
 	categoryPrimary?: string;
 	categoryDetailed?: string;
-	raw: Transaction;
 };
 
 function transactionKind(amount: number): TransactionKind {
@@ -254,7 +253,6 @@ function mapPlaidTransaction(transaction: Transaction): MappedPlaidTransaction {
 		isoCurrencyCode: transaction.iso_currency_code ?? undefined,
 		pending: transaction.pending,
 		categoryPrimary: categoryPrimary(transaction),
-		categoryDetailed: categoryDetailed(transaction),
-		raw: transaction
+		categoryDetailed: categoryDetailed(transaction)
 	};
 }

@@ -1,7 +1,6 @@
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 
-const connectionProvider = v.union(v.literal('plaid'), v.literal('gmail'));
 const connectionStatus = v.union(
 	v.literal('connected'),
 	v.literal('needs_reconnect'),
@@ -10,36 +9,10 @@ const connectionStatus = v.union(
 );
 const transactionSource = v.union(v.literal('plaid'), v.literal('gmail_amazon'));
 const transactionKind = v.union(v.literal('expense'), v.literal('income'), v.literal('transfer'));
-const transactionClassification = v.union(
-	v.literal('known_recurring'),
-	v.literal('expected'),
-	v.literal('dynamic'),
-	v.literal('unreviewed')
-);
-const classificationSource = v.union(
-	v.literal('manual'),
-	v.literal('merchant_rule'),
-	v.literal('category_rule'),
-	v.literal('ai'),
-	v.literal('default')
-);
 const syncSource = v.union(v.literal('plaid'), v.literal('gmail'), v.literal('ai'));
 const syncStatus = v.union(v.literal('running'), v.literal('success'), v.literal('error'));
 
 export default defineSchema({
-	connections: defineTable({
-		provider: connectionProvider,
-		status: connectionStatus,
-		displayName: v.string(),
-		connectedAt: v.number(),
-		updatedAt: v.number(),
-		lastSyncAt: v.optional(v.number()),
-		errorCode: v.optional(v.string()),
-		errorMessage: v.optional(v.string())
-	})
-		.index('by_provider', ['provider'])
-		.index('by_provider_and_status', ['provider', 'status']),
-
 	plaidItems: defineTable({
 		itemId: v.string(),
 		accessToken: v.string(),
@@ -72,6 +45,10 @@ export default defineSchema({
 		.index('by_plaidItemId', ['plaidItemId'])
 		.index('by_providerAccountId', ['providerAccountId']),
 
+	// A transaction is the WHERE + money: one bank charge that reconciles to the statement.
+	// Category and classification are NOT stored here — they are resolved at read time from the
+	// rule/cache tables (see resolution.ts). What was bought (the WHAT) lives in line items:
+	// a plain Plaid charge is one synthesized line item; a matched order explodes into its items.
 	transactions: defineTable({
 		source: transactionSource,
 		providerTransactionId: v.optional(v.string()),
@@ -87,48 +64,29 @@ export default defineSchema({
 		isoCurrencyCode: v.optional(v.string()),
 		pending: v.boolean(),
 		removed: v.boolean(),
+		// Raw provider category hints, kept only as input to the AI categorizer.
 		categoryPrimary: v.optional(v.string()),
 		categoryDetailed: v.optional(v.string()),
-		userCategory: v.optional(v.string()),
-		// Resolved canonical category (slug) for the month-over-month dashboard.
-		categorySlug: v.optional(v.string()),
-		categorySource: v.optional(v.union(v.literal('ai'), v.literal('manual'))),
-		classification: transactionClassification,
-		classificationSource: classificationSource,
-		classificationConfidence: v.optional(v.number()),
-		reviewedAt: v.optional(v.number()),
 		notes: v.optional(v.string()),
 		importedAt: v.number(),
 		updatedAt: v.number()
 	})
 		.index('by_source_and_providerTransactionId', ['source', 'providerTransactionId'])
 		.index('by_date', ['date'])
-		.index('by_classification_and_date', ['classification', 'date'])
 		.index('by_accountId_and_date', ['accountId', 'date'])
-		.index('by_normalizedMerchant', ['normalizedMerchant'])
-		.index('by_categoryDetailed', ['categoryDetailed'])
-		.index('by_categoryPrimary', ['categoryPrimary'])
-		.index('by_categorySlug', ['categorySlug']),
-
-	transactionSources: defineTable({
-		source: transactionSource,
-		providerId: v.string(),
-		transactionId: v.optional(v.id('transactions')),
-		raw: v.any(),
-		importedAt: v.number(),
-		updatedAt: v.number()
-	})
-		.index('by_source_and_providerId', ['source', 'providerId'])
-		.index('by_transactionId', ['transactionId']),
+		.index('by_normalizedMerchant', ['normalizedMerchant']),
 
 	merchantRules: defineTable({
 		matchType: v.union(v.literal('exact'), v.literal('contains')),
 		pattern: v.string(),
 		normalizedPattern: v.string(),
+		// `transfer` marks the merchant's charges as non-spending (e.g. a credit-card payment),
+		// resolved to kind 'transfer' and excluded from the dynamic queue and breakdown.
 		classification: v.union(
 			v.literal('known_recurring'),
 			v.literal('expected'),
-			v.literal('dynamic')
+			v.literal('dynamic'),
+			v.literal('transfer')
 		),
 		expectedMonthlyAmount: v.optional(v.number()),
 		active: v.boolean(),
@@ -161,8 +119,13 @@ export default defineSchema({
 		createdAt: v.number()
 	}).index('by_state', ['state']),
 
-	amazonOrders: defineTable({
-		gmailMessageId: v.string(),
+	// A parsed order/receipt from an email adapter (Amazon today, any store tomorrow). `source` is
+	// the import provenance (gmail); `merchant` is the canonical store ('amazon'). Its line items
+	// live in `orderItems`; when matched to a transaction they become that charge's line items.
+	orders: defineTable({
+		source: v.union(v.literal('gmail')),
+		merchant: v.string(),
+		sourceMessageId: v.string(),
 		orderId: v.optional(v.string()),
 		orderDate: v.optional(v.string()),
 		subtotal: v.optional(v.number()),
@@ -179,44 +142,42 @@ export default defineSchema({
 		importedAt: v.number(),
 		updatedAt: v.number()
 	})
-		.index('by_gmailMessageId', ['gmailMessageId'])
+		.index('by_sourceMessageId', ['sourceMessageId'])
 		.index('by_orderId', ['orderId'])
 		.index('by_reviewState', ['reviewState'])
 		.index('by_matchedTransactionId', ['matchedTransactionId']),
 
-	amazonOrderItems: defineTable({
-		amazonOrderId: v.id('amazonOrders'),
-		asin: v.optional(v.string()),
+	// Parsed line items belonging to an order. Purely descriptive (the WHAT) — category and
+	// classification are resolved at read time from `(merchant, sku)` rule/cache tables.
+	orderItems: defineTable({
+		orderId: v.id('orders'),
+		sku: v.optional(v.string()),
 		title: v.string(),
 		quantity: v.optional(v.number()),
 		amount: v.optional(v.number()),
-		// Resolved canonical category (slug) stored in `category`; source tracks who set it.
-		category: v.optional(v.string()),
-		categorySource: v.optional(v.union(v.literal('ai'), v.literal('manual'))),
-		classification: transactionClassification,
 		importedAt: v.number(),
 		updatedAt: v.number()
 	})
-		.index('by_amazonOrderId', ['amazonOrderId'])
-		.index('by_asin', ['asin'])
-		.index('by_classification', ['classification']),
+		.index('by_orderId', ['orderId'])
+		.index('by_sku', ['sku']),
 
-	// User rules keyed on Amazon ASIN so repeat purchases (e.g. Subscribe & Save) auto-classify.
-	amazonItemRules: defineTable({
-		asin: v.string(),
+	// User classification rules keyed on a product `(merchant, sku)` so repeat purchases
+	// (e.g. Subscribe & Save) auto-classify — the "expected item" / "recurring item" rules.
+	itemRules: defineTable({
+		merchant: v.string(),
+		sku: v.string(),
 		title: v.optional(v.string()),
 		classification: v.union(
 			v.literal('known_recurring'),
 			v.literal('expected'),
 			v.literal('dynamic')
 		),
-		category: v.optional(v.string()),
 		active: v.boolean(),
 		createdAt: v.number(),
 		updatedAt: v.number()
 	})
 		.index('by_active', ['active'])
-		.index('by_asin', ['asin']),
+		.index('by_merchant_sku', ['merchant', 'sku']),
 
 	// User-editable canonical taxonomy. Every category is AI-driven: `description` tells the
 	// AI how to decide a transaction belongs here (may be blank when the name is self-evident).
@@ -250,9 +211,11 @@ export default defineSchema({
 		updatedAt: v.number()
 	}).index('by_normalizedMerchant', ['normalizedMerchant']),
 
-	// Per-ASIN AI category cache so each Amazon item is categorized once and new orders inherit.
-	amazonItemCategories: defineTable({
-		asin: v.string(),
+	// Per-product `(merchant, sku)` category cache/assignment so each item is categorized once and
+	// new orders inherit. A manual pick writes here with `source: 'manual'` and outranks AI.
+	itemCategories: defineTable({
+		merchant: v.string(),
+		sku: v.string(),
 		title: v.optional(v.string()),
 		categorySlug: v.string(),
 		source: v.union(v.literal('ai'), v.literal('manual')),
@@ -260,7 +223,7 @@ export default defineSchema({
 		active: v.boolean(),
 		createdAt: v.number(),
 		updatedAt: v.number()
-	}).index('by_asin', ['asin']),
+	}).index('by_merchant_sku', ['merchant', 'sku']),
 
 	// Single-row app configuration for the pluggable AI provider/model.
 	appConfig: defineTable({
@@ -294,8 +257,11 @@ export default defineSchema({
 		weight: v.number(),
 		members: v.array(
 			v.object({
-				kind: v.union(v.literal('merchant'), v.literal('asin')),
+				kind: v.union(v.literal('merchant'), v.literal('item')),
+				// For a merchant member: the normalizedMerchant. For an item member: the sku.
 				key: v.string(),
+				// The canonical merchant, present on item members so `(merchant, sku)` is resolvable.
+				merchant: v.optional(v.string()),
 				title: v.optional(v.string()),
 				weight: v.number()
 			})
@@ -305,21 +271,6 @@ export default defineSchema({
 		createdAt: v.number(),
 		updatedAt: v.number()
 	}).index('by_status', ['status']),
-
-	aiClassifications: defineTable({
-		transactionId: v.id('transactions'),
-		promptVersion: v.string(),
-		model: v.string(),
-		inputHash: v.string(),
-		classification: transactionClassification,
-		category: v.optional(v.string()),
-		confidence: v.number(),
-		reason: v.string(),
-		applied: v.boolean(),
-		createdAt: v.number()
-	})
-		.index('by_transactionId', ['transactionId'])
-		.index('by_applied', ['applied']),
 
 	syncRuns: defineTable({
 		source: syncSource,

@@ -15,6 +15,8 @@ import type * as gmailActions from "../gmailActions.js";
 import type * as http from "../http.js";
 import type * as plaid from "../plaid.js";
 import type * as plaidActions from "../plaidActions.js";
+import type * as reset from "../reset.js";
+import type * as resolution from "../resolution.js";
 
 import type {
   ApiFromModules,
@@ -30,6 +32,8 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   plaid: typeof plaid;
   plaidActions: typeof plaidActions;
+  reset: typeof reset;
+  resolution: typeof resolution;
 }>;
 
 /**

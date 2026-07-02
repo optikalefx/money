@@ -4,6 +4,15 @@
 	import type { Id } from '../../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
 
+	type LineItem = {
+		merchant: string;
+		orderSource: string | null;
+		sku: string | null;
+		title: string;
+		amount: number;
+		categorySlug: string;
+		category: string;
+	};
 	type ExpectedRow = {
 		id: Id<'transactions'>;
 		date: string;
@@ -12,13 +21,13 @@
 		amount: number;
 		kind: 'expense' | 'income' | 'transfer';
 		pending: boolean;
-		category: string;
-		classificationSource: string;
 		source: string;
-		amazonItems?: Array<{ title: string; quantity: number | null; amount: number | null }>;
+		lineItems: LineItem[];
 	};
 	type MerchantRow = {
 		key: string;
+		merchant: string;
+		sku: string | null;
 		normalizedMerchant: string;
 		label: string;
 		total: number;
@@ -28,7 +37,7 @@
 	type CategoryRow = {
 		key: string;
 		slug: string;
-		categoryId: Id<'categories'>;
+		categoryId: Id<'categories'> | null;
 		label: string;
 		total: number;
 		count: number;
@@ -54,8 +63,12 @@
 	const table = useQuery(api.plaid.getExpectedTransactions, () => tableArgs, {
 		keepPreviousData: true
 	});
+	const categoriesQuery = useQuery(api.categories.listCategories, () => ({}));
 	const unmarkMerchantMutation = useMutation(api.plaid.unmarkExpectedMerchant);
+	const unmarkLineItemMutation = useMutation(api.plaid.unmarkLineItem);
+	const unmarkTransferMutation = useMutation(api.plaid.unmarkTransferMerchant);
 	const setCategoryTreatmentMutation = useMutation(api.categories.setCategoryTreatment);
+	const setLineItemCategoryMutation = useMutation(api.plaid.setLineItemCategory);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',
@@ -64,7 +77,58 @@
 	const summaryData = $derived(summary.data);
 	const byMerchant = $derived((summaryData?.byMerchant ?? []) as MerchantRow[]);
 	const byCategory = $derived((summaryData?.byCategory ?? []) as CategoryRow[]);
+	const byTransfer = $derived((summaryData?.byTransfer ?? []) as MerchantRow[]);
 	const transactions = $derived((table.data ?? []) as ExpectedRow[]);
+	const selectableCategories = $derived(
+		(categoriesQuery.data ?? []).filter((category) => category.slug !== 'uncategorized')
+	);
+	let markingCategoryKey = $state<string | null>(null);
+
+	function capitalize(value: string) {
+		return value.charAt(0).toUpperCase() + value.slice(1);
+	}
+	function lineSource(row: ExpectedRow, line: LineItem) {
+		if (line.orderSource) return `${capitalize(line.orderSource)} · ${capitalize(line.merchant)}`;
+		return row.source;
+	}
+	function lineKey(rowId: string, line: LineItem) {
+		return `${rowId}:${line.sku ?? ''}`;
+	}
+
+	async function assignCategory(row: ExpectedRow, line: LineItem, categorySlug: string) {
+		if (!categorySlug) return;
+		markingCategoryKey = lineKey(row.id, line);
+		errorMessage = '';
+		try {
+			const result = await setLineItemCategoryMutation({
+				merchant: line.merchant,
+				sku: line.sku ?? undefined,
+				categorySlug
+			});
+			statusMessage = `Categorized as ${result.category}.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to set category.';
+		} finally {
+			markingCategoryKey = null;
+		}
+	}
+
+	async function unmarkTransfer(merchant: MerchantRow) {
+		unmarkingKey = merchant.key;
+		errorMessage = '';
+		try {
+			const result = await unmarkTransferMutation({
+				normalizedMerchant: merchant.normalizedMerchant
+			});
+			statusMessage = `${merchant.label} is no longer ignored (${result.updated} transaction${
+				result.updated === 1 ? '' : 's'
+			} back in the queue).`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to unmark.';
+		} finally {
+			unmarkingKey = null;
+		}
+	}
 
 	function lastDayOfMonth(month: string) {
 		const [year, monthIndex] = month.split('-').map(Number);
@@ -76,18 +140,15 @@
 		return currency.format(amount);
 	}
 
-	function categoryFor(transaction: ExpectedRow) {
-		return transaction.category;
-	}
-
 	async function unmarkMerchant(merchant: MerchantRow) {
 		unmarkingKey = merchant.key;
 		errorMessage = '';
 
 		try {
-			const result = await unmarkMerchantMutation({
-				normalizedMerchant: merchant.normalizedMerchant
-			});
+			// Item rows are keyed on `(merchant, sku)`; everything else on the merchant.
+			const result = merchant.sku
+				? await unmarkLineItemMutation({ merchant: merchant.merchant, sku: merchant.sku })
+				: await unmarkMerchantMutation({ normalizedMerchant: merchant.normalizedMerchant });
 			statusMessage = `${merchant.label} is no longer expected (${result.updated} transaction${
 				result.updated === 1 ? '' : 's'
 			} moved back to dynamic).`;
@@ -99,17 +160,16 @@
 	}
 
 	async function unmarkCategory(category: CategoryRow) {
+		if (!category.categoryId) return;
 		unmarkingKey = category.key;
 		errorMessage = '';
 
 		try {
-			const result = await setCategoryTreatmentMutation({
+			await setCategoryTreatmentMutation({
 				id: category.categoryId,
 				treatment: null
 			});
-			statusMessage = `${category.label} is no longer expected (${result.updated} transaction${
-				result.updated === 1 ? '' : 's'
-			} moved back to dynamic).`;
+			statusMessage = `${category.label} is no longer expected (moved back to dynamic).`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to unmark.';
 		} finally {
@@ -240,6 +300,46 @@
 		</div>
 	</section>
 
+	{#if byTransfer.length}
+		<section class="data-section">
+			<div class="section-heading compact">
+				<div>
+					<p class="eyebrow">Ignored</p>
+					<h2>Transfers</h2>
+				</div>
+			</div>
+			<div class="insight-panel organic-surface">
+				<div class="merchant-list">
+					<div class="merchant-head">
+						<span>Merchant</span>
+						<span class="amount-column">Total</span>
+						<span class="amount-column">Monthly</span>
+						<span></span>
+					</div>
+					{#each byTransfer as row (row.key)}
+						<div class="merchant-row">
+							<div class="merchant-info">
+								<strong>{row.label}</strong>
+								<span>{row.count} rows</span>
+							</div>
+							<b class="amount-column">{formatAmount(row.total)}</b>
+							<b class="amount-column">{formatAmount(row.monthly)}</b>
+							<button
+								type="button"
+								class="unmark-button"
+								title="Move this merchant back into the review queue"
+								disabled={unmarkingKey === row.key}
+								onclick={() => unmarkTransfer(row)}
+							>
+								{unmarkingKey === row.key ? 'Unmarking...' : 'Unmark'}
+							</button>
+						</div>
+					{/each}
+				</div>
+			</div>
+		</section>
+	{/if}
+
 	<section class="data-section">
 		<div class="section-heading">
 			<div>
@@ -284,25 +384,33 @@
 							<tr>
 								<td data-label="Date">{transaction.date}</td>
 								<td data-label="Merchant">
-									{#if transaction.amazonItems && transaction.amazonItems.length}
-										{#each transaction.amazonItems as item, i (i)}
-											{@const short = truncateWords(item.title, 6)}
-											<strong use:tooltip={short === item.title ? undefined : item.title}
-												>{short}</strong
-											>
-										{/each}
-										<span class="source-line"
-											>Gmail · {transaction.merchantName ?? transaction.name}</span
-										>
-									{:else}
-										<strong>{transaction.merchantName ?? transaction.name}</strong>
-										<span class="source-line">{transaction.source}</span>
-									{/if}
+									{#each transaction.lineItems as line, i (i)}
+										{@const short = truncateWords(line.title, 6)}
+										<strong use:tooltip={short === line.title ? undefined : line.title}>{short}</strong>
+									{/each}
+									<span class="source-line">{lineSource(transaction, transaction.lineItems[0])}</span>
 									{#if transaction.pending}
 										<span class="pending-chip">Pending</span>
 									{/if}
 								</td>
-								<td data-label="Category">{categoryFor(transaction)}</td>
+								<td data-label="Category">
+									<div class="category-stack">
+										{#each transaction.lineItems as line, i (i)}
+											<select
+												class="category-select"
+												disabled={markingCategoryKey === lineKey(transaction.id, line)}
+												value={line.categorySlug !== 'uncategorized' ? line.categorySlug : ''}
+												onchange={(event) =>
+													assignCategory(transaction, line, event.currentTarget.value)}
+											>
+												<option value="">Uncategorized</option>
+												{#each selectableCategories as category (category.slug)}
+													<option value={category.slug}>{category.name}</option>
+												{/each}
+											</select>
+										{/each}
+									</div>
+								</td>
 								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td>
 							</tr>
 						{/each}
@@ -518,6 +626,31 @@
 	.source-line {
 		color: var(--color-muted-foreground);
 		font-size: 0.82rem;
+	}
+
+	.category-stack {
+		display: grid;
+		gap: 0.35rem;
+		align-items: start;
+	}
+
+	.category-select {
+		width: 100%;
+		min-height: 2.4rem;
+		padding: 0.45rem 0.6rem;
+		color: var(--color-foreground);
+		background: rgb(254 254 250 / 78%);
+		border: 1px solid rgb(222 216 207 / 80%);
+		border-radius: var(--radius-pill);
+		font: inherit;
+		font-size: 0.82rem;
+		font-weight: 800;
+		cursor: pointer;
+	}
+
+	.category-select:disabled {
+		cursor: not-allowed;
+		opacity: 0.58;
 	}
 
 	.table-shell {

@@ -6,6 +6,7 @@ import {
 	query,
 	type MutationCtx
 } from './_generated/server';
+import { loadResolutionData, ruleStatusFor } from './resolution';
 
 const aiProvider = v.union(v.literal('openai'), v.literal('anthropic'));
 
@@ -206,6 +207,22 @@ export const setAiConfig = mutation({
 	}
 });
 
+// Seed the singleton `appConfig` row with the defaults if it doesn't exist yet. Idempotent, so it's
+// safe to run on every deploy. Run once with `npx convex run categories:initAppConfig`.
+export const initAppConfig = internalMutation({
+	args: {},
+	handler: async (ctx) => {
+		const existing = (await ctx.db.query('appConfig').take(1))[0];
+		if (existing) return { id: existing._id, created: false };
+		const id = await ctx.db.insert('appConfig', {
+			aiProvider: DEFAULT_AI_CONFIG.aiProvider,
+			aiModel: DEFAULT_AI_CONFIG.aiModel,
+			updatedAt: Date.now()
+		});
+		return { id, created: true };
+	}
+});
+
 // ---------------------------------------------------------------------------
 // AI categorization support (called from the `'use node'` action in aiActions.ts)
 // ---------------------------------------------------------------------------
@@ -253,8 +270,17 @@ export const listAiRuns = query({
 
 const SCAN_LIMIT = 500;
 
+// A cache row is "settled" when it holds a real category, or is a manual pick (even if
+// uncategorized). An AI-assigned `uncategorized` is a miss, so Categorize retries it every run.
+function isSettledCategory(
+	cached: { categorySlug: string; source: 'ai' | 'manual' } | undefined
+): boolean {
+	if (!cached) return false;
+	return cached.categorySlug !== 'uncategorized' || cached.source === 'manual';
+}
+
 // Gather everything the AI needs in one round trip: the taxonomy, the chosen model, and the
-// distinct uncategorized "units" (non-Amazon merchants + Amazon ASINs) still needing a category.
+// distinct uncategorized "units" (non-Amazon merchants + item SKUs) still needing a category.
 export const getCategorizationInput = internalQuery({
 	args: { force: v.optional(v.boolean()) },
 	handler: async (ctx, args) => {
@@ -273,45 +299,29 @@ export const getCategorizationInput = internalQuery({
 
 		const config = (await ctx.db.query('appConfig').take(1))[0];
 
-		// Non-Amazon merchant units from dynamic + unreviewed expense transactions.
-		const dynamicRows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) => q.eq('classification', 'dynamic'))
-			.order('desc')
-			.take(SCAN_LIMIT);
-		const unreviewedRows = await ctx.db
-			.query('transactions')
-			.withIndex('by_classification_and_date', (q) => q.eq('classification', 'unreviewed'))
-			.order('desc')
-			.take(SCAN_LIMIT);
-
+		// Merchant units: distinct non-Amazon merchants from recent expense charges still needing
+		// the AI. A merchant is settled only if it has a real cached category or a manual pick — an
+		// AI-assigned `uncategorized` is a miss and gets retried every run (that's what Categorize is
+		// for). `force` re-sends everything.
+		const txns = await ctx.db.query('transactions').withIndex('by_date').order('desc').take(SCAN_LIMIT);
 		const merchantUnits = new Map<
 			string,
 			{ normalizedMerchant: string; name: string; plaidCategory: string }
 		>();
-		// Merchants that already have a cached category but still have uncategorized transactions:
-		// no AI needed, but we must fan the cached slug out to those transactions.
-		const cachedMerchants = new Map<string, { normalizedMerchant: string; categorySlug: string }>();
-		for (const row of [...dynamicRows, ...unreviewedRows]) {
+		for (const row of txns) {
 			if (row.removed || row.kind !== 'expense') continue;
-			if (!force && row.categorySlug) continue;
 			if (row.normalizedMerchant.includes('amazon')) continue;
-			if (merchantUnits.has(row.normalizedMerchant) || cachedMerchants.has(row.normalizedMerchant))
-				continue;
+			if (merchantUnits.has(row.normalizedMerchant)) continue;
 			if (!force) {
-				const cached = await ctx.db
-					.query('merchantCategories')
-					.withIndex('by_normalizedMerchant', (q) =>
-						q.eq('normalizedMerchant', row.normalizedMerchant)
-					)
-					.take(1);
-				if (cached[0]) {
-					cachedMerchants.set(row.normalizedMerchant, {
-						normalizedMerchant: row.normalizedMerchant,
-						categorySlug: cached[0].categorySlug
-					});
-					continue;
-				}
+				const cached = (
+					await ctx.db
+						.query('merchantCategories')
+						.withIndex('by_normalizedMerchant', (q) =>
+							q.eq('normalizedMerchant', row.normalizedMerchant)
+						)
+						.take(1)
+				)[0];
+				if (isSettledCategory(cached)) continue;
 			}
 			merchantUnits.set(row.normalizedMerchant, {
 				normalizedMerchant: row.normalizedMerchant,
@@ -320,31 +330,32 @@ export const getCategorizationInput = internalQuery({
 			});
 		}
 
-		// Amazon ASIN units from parsed order items without a cached category.
-		const items = await ctx.db.query('amazonOrderItems').order('desc').take(SCAN_LIMIT);
-		const asinUnits = new Map<string, { asin: string; title: string }>();
-		// ASINs already cached but not yet applied everywhere — fan out without re-hitting the AI.
-		const cachedAsins = new Map<
-			string,
-			{ asin: string; title: string; categorySlug: string }
-		>();
-		for (const item of items) {
-			if (!item.asin || asinUnits.has(item.asin) || cachedAsins.has(item.asin)) continue;
-			if (!force) {
-				const cached = await ctx.db
-					.query('amazonItemCategories')
-					.withIndex('by_asin', (q) => q.eq('asin', item.asin!))
-					.take(1);
-				if (cached[0]) {
-					cachedAsins.set(item.asin, {
-						asin: item.asin,
-						title: item.title,
-						categorySlug: cached[0].categorySlug
-					});
-					continue;
+		// Item units: distinct `(merchant, sku)` from recent orders still needing the AI (same
+		// "settled" rule as merchants).
+		const orders = await ctx.db.query('orders').order('desc').take(SCAN_LIMIT);
+		const itemUnits = new Map<string, { merchant: string; sku: string; title: string }>();
+		for (const order of orders) {
+			const orderItems = await ctx.db
+				.query('orderItems')
+				.withIndex('by_orderId', (q) => q.eq('orderId', order._id))
+				.take(50);
+			for (const item of orderItems) {
+				if (!item.sku) continue;
+				const key = `${order.merchant} ${item.sku}`;
+				if (itemUnits.has(key)) continue;
+				if (!force) {
+					const cached = (
+						await ctx.db
+							.query('itemCategories')
+							.withIndex('by_merchant_sku', (q) =>
+								q.eq('merchant', order.merchant).eq('sku', item.sku!)
+							)
+							.take(1)
+					)[0];
+					if (isSettledCategory(cached)) continue;
 				}
+				itemUnits.set(key, { merchant: order.merchant, sku: item.sku, title: item.title });
 			}
-			asinUnits.set(item.asin, { asin: item.asin, title: item.title });
 		}
 
 		return {
@@ -352,9 +363,7 @@ export const getCategorizationInput = internalQuery({
 			aiProvider: config?.aiProvider ?? DEFAULT_AI_CONFIG.aiProvider,
 			aiModel: config?.aiModel ?? DEFAULT_AI_CONFIG.aiModel,
 			merchantUnits: [...merchantUnits.values()],
-			asinUnits: [...asinUnits.values()],
-			cachedMerchants: [...cachedMerchants.values()],
-			cachedAsins: [...cachedAsins.values()]
+			itemUnits: [...itemUnits.values()]
 		};
 	}
 });
@@ -363,89 +372,34 @@ export const saveCategoryAssignments = internalMutation({
 	args: {
 		model: v.optional(v.string()),
 		merchants: v.array(v.object({ normalizedMerchant: v.string(), categorySlug: v.string() })),
-		asins: v.array(
-			v.object({ asin: v.string(), title: v.optional(v.string()), categorySlug: v.string() })
+		items: v.array(
+			v.object({
+				merchant: v.string(),
+				sku: v.string(),
+				title: v.optional(v.string()),
+				categorySlug: v.string()
+			})
 		)
 	},
 	handler: async (ctx, args) => {
 		let applied = 0;
 		for (const merchant of args.merchants) {
-			applied += await applyMerchantCategory(
-				ctx,
-				merchant.normalizedMerchant,
-				merchant.categorySlug,
-				args.model
-			);
+			applied += await applyMerchantCategory(ctx, merchant.normalizedMerchant, merchant.categorySlug, {
+				model: args.model
+			});
 		}
-		for (const asin of args.asins) {
-			applied += await applyAsinCategory(ctx, asin.asin, asin.title, asin.categorySlug, args.model);
+		for (const item of args.items) {
+			applied += await applyItemCategory(ctx, item.merchant, item.sku, item.categorySlug, {
+				model: args.model,
+				title: item.title
+			});
 		}
 		return { applied };
 	}
 });
 
-// A canonical category's `treatment` decides how its transactions are classified. Category
-// treatment outranks the default but yields to manual marks and merchant rules, so we only ever
-// (re)stamp transactions whose classification came from the default or a prior category treatment.
-export type CategoryTreatment = 'expected' | 'transfer' | null | undefined;
-
-export const CATEGORY_OWNED_SOURCES = new Set(['default', 'category_rule']);
-
-// The classification/kind a category treatment implies. `null` treatment resets to plain dynamic.
-export function treatmentPatch(treatment: CategoryTreatment): {
-	classification: 'expected' | 'dynamic';
-	classificationSource: 'category_rule' | 'default';
-	classificationConfidence: number | undefined;
-	kind: 'expense' | 'transfer';
-} {
-	if (treatment === 'expected') {
-		return {
-			classification: 'expected',
-			classificationSource: 'category_rule',
-			classificationConfidence: 0.9,
-			kind: 'expense'
-		};
-	}
-	if (treatment === 'transfer') {
-		return {
-			classification: 'dynamic',
-			classificationSource: 'category_rule',
-			classificationConfidence: 0.9,
-			kind: 'transfer'
-		};
-	}
-	return {
-		classification: 'dynamic',
-		classificationSource: 'default',
-		classificationConfidence: undefined,
-		kind: 'expense'
-	};
-}
-
-// Re-stamp every category-owned transaction sharing this slug to match the category's treatment.
-// Returns how many transactions changed.
-export async function reclassifyCategoryTransactions(
-	ctx: MutationCtx,
-	slug: string,
-	treatment: CategoryTreatment
-) {
-	const now = Date.now();
-	const patch = treatmentPatch(treatment);
-	const transactions = await ctx.db
-		.query('transactions')
-		.withIndex('by_categorySlug', (q) => q.eq('categorySlug', slug))
-		.take(1000);
-	let updated = 0;
-	for (const transaction of transactions) {
-		if (transaction.removed) continue;
-		if (!CATEGORY_OWNED_SOURCES.has(transaction.classificationSource)) continue;
-		await ctx.db.patch(transaction._id, { ...patch, reviewedAt: now, updatedAt: now });
-		updated += 1;
-	}
-	return updated;
-}
-
-// Set (or clear with `null`) a canonical category's treatment and reclassify its transactions.
+// Set (or clear with `null`) a canonical category's `treatment`. Every line in the category
+// resolves to that treatment at read time, so there is nothing to fan out.
 export const setCategoryTreatment = mutation({
 	args: {
 		id: v.id('categories'),
@@ -458,107 +412,68 @@ export const setCategoryTreatment = mutation({
 			treatment: args.treatment ?? undefined,
 			updatedAt: Date.now()
 		});
-		const updated = await reclassifyCategoryTransactions(ctx, category.slug, args.treatment);
-		return { ok: true, slug: category.slug, treatment: args.treatment, updated };
+		return { ok: true, slug: category.slug, treatment: args.treatment };
 	}
 });
 
-// Upsert the per-merchant category cache and fan the slug out to that merchant's transactions.
-async function applyMerchantCategory(
+type ApplyOpts = { model?: string; source?: 'ai' | 'manual'; title?: string };
+
+// Upsert the per-merchant category assignment. Category is resolved from this cache at read time,
+// so there is no per-transaction fan-out. A manual pick outranks (and is never overwritten by) AI.
+export async function applyMerchantCategory(
 	ctx: MutationCtx,
 	normalizedMerchant: string,
 	categorySlug: string,
-	model?: string
+	opts: ApplyOpts = {}
 ) {
 	const now = Date.now();
+	const source = opts.source ?? 'ai';
 	const existing = await ctx.db
 		.query('merchantCategories')
 		.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
 		.unique();
-	const doc = {
-		normalizedMerchant,
-		categorySlug,
-		source: 'ai' as const,
-		model,
-		active: true,
-		updatedAt: now
-	};
+	if (existing && existing.source === 'manual' && source === 'ai') return 0;
+	const doc = { normalizedMerchant, categorySlug, source, model: opts.model, active: true, updatedAt: now };
 	if (existing) {
 		await ctx.db.patch(existing._id, doc);
 	} else {
 		await ctx.db.insert('merchantCategories', { ...doc, createdAt: now });
 	}
-
-	// Carry the destination category's treatment onto the transactions we're categorizing, so
-	// expected/transfer categories classify their transactions the moment they get their slug.
-	const category = await ctx.db
-		.query('categories')
-		.withIndex('by_slug', (q) => q.eq('slug', categorySlug))
-		.unique();
-	const treatment = category?.treatment ?? null;
-
-	const transactions = await ctx.db
-		.query('transactions')
-		.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
-		.take(500);
-	let applied = 0;
-	for (const transaction of transactions) {
-		if (transaction.removed || transaction.categorySource === 'manual') continue;
-		// Only category-owned classifications follow the treatment; manual/merchant marks win.
-		const classificationPatch =
-			treatment && CATEGORY_OWNED_SOURCES.has(transaction.classificationSource)
-				? { ...treatmentPatch(treatment), reviewedAt: now }
-				: {};
-		await ctx.db.patch(transaction._id, {
-			categorySlug,
-			categorySource: 'ai',
-			...classificationPatch,
-			updatedAt: now
-		});
-		applied += 1;
-	}
-	return applied;
+	return 1;
 }
 
-// Upsert the per-ASIN category cache and fan the slug out to every order item sharing that ASIN.
-async function applyAsinCategory(
+// Upsert the per-product `(merchant, sku)` category assignment. Resolved at read time, so no
+// fan-out. A manual pick outranks (and is never overwritten by) AI.
+export async function applyItemCategory(
 	ctx: MutationCtx,
-	asin: string,
-	title: string | undefined,
+	merchant: string,
+	sku: string,
 	categorySlug: string,
-	model?: string
+	opts: ApplyOpts = {}
 ) {
 	const now = Date.now();
+	const source = opts.source ?? 'ai';
 	const existing = await ctx.db
-		.query('amazonItemCategories')
-		.withIndex('by_asin', (q) => q.eq('asin', asin))
+		.query('itemCategories')
+		.withIndex('by_merchant_sku', (q) => q.eq('merchant', merchant).eq('sku', sku))
 		.unique();
+	if (existing && existing.source === 'manual' && source === 'ai') return 0;
 	const doc = {
-		asin,
-		title,
+		merchant,
+		sku,
+		title: opts.title ?? existing?.title,
 		categorySlug,
-		source: 'ai' as const,
-		model,
+		source,
+		model: opts.model,
 		active: true,
 		updatedAt: now
 	};
 	if (existing) {
 		await ctx.db.patch(existing._id, doc);
 	} else {
-		await ctx.db.insert('amazonItemCategories', { ...doc, createdAt: now });
+		await ctx.db.insert('itemCategories', { ...doc, createdAt: now });
 	}
-
-	const items = await ctx.db
-		.query('amazonOrderItems')
-		.withIndex('by_asin', (q) => q.eq('asin', asin))
-		.take(500);
-	let applied = 0;
-	for (const item of items) {
-		if (item.categorySource === 'manual') continue;
-		await ctx.db.patch(item._id, { category: categorySlug, categorySource: 'ai', updatedAt: now });
-		applied += 1;
-	}
-	return applied;
+	return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -611,19 +526,26 @@ export const getUncategorizedUnits = internalQuery({
 			});
 		}
 
-		const asinRows = (await ctx.db.query('amazonItemCategories').take(2000)).filter(
+		const itemRows = (await ctx.db.query('itemCategories').take(2000)).filter(
 			(row) => row.active && row.categorySlug === UNCATEGORIZED
 		);
-		const asinUnits: Array<{ kind: 'asin'; key: string; title: string; weight: number }> = [];
-		for (const row of asinRows) {
+		const itemUnits: Array<{
+			kind: 'item';
+			key: string;
+			merchant: string;
+			title: string;
+			weight: number;
+		}> = [];
+		for (const row of itemRows) {
 			const items = await ctx.db
-				.query('amazonOrderItems')
-				.withIndex('by_asin', (q) => q.eq('asin', row.asin))
+				.query('orderItems')
+				.withIndex('by_sku', (q) => q.eq('sku', row.sku))
 				.take(100);
-			asinUnits.push({
-				kind: 'asin',
-				key: row.asin,
-				title: row.title ?? items[0]?.title ?? row.asin,
+			itemUnits.push({
+				kind: 'item',
+				key: row.sku,
+				merchant: row.merchant,
+				title: row.title ?? items[0]?.title ?? row.sku,
 				weight: Math.max(items.length, 1)
 			});
 		}
@@ -632,14 +554,15 @@ export const getUncategorizedUnits = internalQuery({
 			categories,
 			aiProvider: config?.aiProvider ?? DEFAULT_AI_CONFIG.aiProvider,
 			aiModel: config?.aiModel ?? DEFAULT_AI_CONFIG.aiModel,
-			units: [...merchantUnits, ...asinUnits]
+			units: [...merchantUnits, ...itemUnits]
 		};
 	}
 });
 
 const suggestionMemberValidator = v.object({
-	kind: v.union(v.literal('merchant'), v.literal('asin')),
+	kind: v.union(v.literal('merchant'), v.literal('item')),
 	key: v.string(),
+	merchant: v.optional(v.string()),
 	title: v.optional(v.string()),
 	weight: v.number()
 });
@@ -711,12 +634,15 @@ export const getSuggestionTransactions = query({
 		const suggestion = await ctx.db.get(args.id);
 		if (!suggestion) return [];
 
+		const data = await loadResolutionData(ctx);
 		const rows: Array<{
 			date: string;
 			name: string;
 			merchant: string;
 			amount: number | null;
 			source: string;
+			// Whether this line is already pulled out of dynamic by a rule/treatment.
+			status: 'recurring' | 'expected' | 'transfer' | null;
 		}> = [];
 
 		for (const member of suggestion.members) {
@@ -732,22 +658,36 @@ export const getSuggestionTransactions = query({
 						name: t.name,
 						merchant: t.merchantName ?? t.name,
 						amount: t.amount,
-						source: 'plaid'
+						source: 'plaid',
+						status: ruleStatusFor(
+							{ merchant: t.normalizedMerchant, sku: null },
+							t.normalizedMerchant,
+							data
+						)
 					});
 				}
 			} else {
 				const items = await ctx.db
-					.query('amazonOrderItems')
-					.withIndex('by_asin', (q) => q.eq('asin', member.key))
+					.query('orderItems')
+					.withIndex('by_sku', (q) => q.eq('sku', member.key))
 					.take(50);
 				for (const item of items) {
-					const order = await ctx.db.get(item.amazonOrderId);
+					const order = await ctx.db.get(item.orderId);
+					const matched = order?.matchedTransactionId
+						? await ctx.db.get(order.matchedTransactionId)
+						: null;
+					const merchant = order?.merchant ?? member.merchant ?? 'item';
 					rows.push({
 						date: order?.orderDate ?? '',
 						name: item.title,
-						merchant: 'Amazon',
+						merchant,
 						amount: item.amount ?? null,
-						source: 'amazon'
+						source: order?.source ?? 'order',
+						status: ruleStatusFor(
+							{ merchant, sku: item.sku ?? null },
+							matched?.normalizedMerchant ?? '',
+							data
+						)
 					});
 				}
 			}
@@ -785,9 +725,12 @@ export const acceptCategorySuggestion = mutation({
 		let applied = 0;
 		for (const member of suggestion.members) {
 			if (member.kind === 'merchant') {
-				applied += await applyMerchantCategory(ctx, member.key, slug, suggestion.model);
-			} else {
-				applied += await applyAsinCategory(ctx, member.key, member.title, slug, suggestion.model);
+				applied += await applyMerchantCategory(ctx, member.key, slug, { model: suggestion.model });
+			} else if (member.merchant) {
+				applied += await applyItemCategory(ctx, member.merchant, member.key, slug, {
+					model: suggestion.model,
+					title: member.title
+				});
 			}
 		}
 

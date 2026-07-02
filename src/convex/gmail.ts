@@ -15,21 +15,14 @@ const connectionStatus = v.union(
 	v.literal('disabled')
 );
 
-const amazonOrderItemValidator = v.object({
+const orderItemValidator = v.object({
 	title: v.string(),
 	quantity: v.optional(v.number()),
 	amount: v.optional(v.number()),
-	category: v.optional(v.string()),
-	asin: v.optional(v.string())
+	sku: v.optional(v.string())
 });
 
-const amazonRuleClassification = v.union(
-	v.literal('known_recurring'),
-	v.literal('expected'),
-	v.literal('dynamic')
-);
-
-// Amount tolerance ($) and date window (days) used to match an Amazon order to a Plaid charge.
+// Amount tolerance ($) and date window (days) used to match a parsed order to a Plaid charge.
 const MATCH_AMOUNT_TOLERANCE = 0.01;
 const MATCH_DATE_WINDOW_DAYS = 5;
 
@@ -53,23 +46,24 @@ export const getConnectionStatus = query({
 	}
 });
 
-export const listAmazonOrders = query({
+export const listOrders = query({
 	args: {
 		limit: v.optional(v.number())
 	},
 	handler: async (ctx, args) => {
 		const limit = Math.min(args.limit ?? 50, 100);
-		const orders = await ctx.db.query('amazonOrders').order('desc').take(limit);
+		const orders = await ctx.db.query('orders').order('desc').take(limit);
 
 		return Promise.all(
 			orders.map(async (order) => {
 				const items = await ctx.db
-					.query('amazonOrderItems')
-					.withIndex('by_amazonOrderId', (q) => q.eq('amazonOrderId', order._id))
+					.query('orderItems')
+					.withIndex('by_orderId', (q) => q.eq('orderId', order._id))
 					.take(50);
 
 				return {
 					id: order._id,
+					merchant: order.merchant,
 					orderId: order.orderId ?? null,
 					orderDate: order.orderDate ?? null,
 					total: order.total ?? null,
@@ -84,7 +78,7 @@ export const listAmazonOrders = query({
 						title: item.title,
 						quantity: item.quantity ?? null,
 						amount: item.amount ?? null,
-						category: item.category ?? null
+						sku: item.sku ?? null
 					}))
 				};
 			})
@@ -212,9 +206,11 @@ export const markGmailError = internalMutation({
 	}
 });
 
-export const upsertAmazonOrder = internalMutation({
+export const upsertOrder = internalMutation({
 	args: {
-		gmailMessageId: v.string(),
+		source: v.literal('gmail'),
+		merchant: v.string(),
+		sourceMessageId: v.string(),
 		orderId: v.optional(v.string()),
 		orderDate: v.optional(v.string()),
 		subtotal: v.optional(v.number()),
@@ -222,29 +218,33 @@ export const upsertAmazonOrder = internalMutation({
 		shipping: v.optional(v.number()),
 		total: v.optional(v.number()),
 		isoCurrencyCode: v.optional(v.string()),
-		items: v.array(amazonOrderItemValidator),
+		items: v.array(orderItemValidator),
+		// Merchant-name patterns for matching this order to a Plaid charge (from the adapter).
+		merchantMatchers: v.array(v.string()),
 		raw: v.any()
 	},
 	handler: async (ctx, args) => {
 		const now = Date.now();
-		// Prefer order-id dedupe: a single Gmail message can contain multiple orders.
+		// Prefer order-id dedupe: a single email can contain multiple orders.
 		const existing = args.orderId
 			? (
 					await ctx.db
-						.query('amazonOrders')
+						.query('orders')
 						.withIndex('by_orderId', (q) => q.eq('orderId', args.orderId))
 						.take(1)
 				)[0]
 			: (
 					await ctx.db
-						.query('amazonOrders')
-						.withIndex('by_gmailMessageId', (q) => q.eq('gmailMessageId', args.gmailMessageId))
+						.query('orders')
+						.withIndex('by_sourceMessageId', (q) => q.eq('sourceMessageId', args.sourceMessageId))
 						.take(1)
 				)[0];
 
-		const match = await findTransactionMatch(ctx, args.total, args.orderDate);
+		const match = await findTransactionMatch(ctx, args.total, args.orderDate, args.merchantMatchers);
 		const orderDoc = {
-			gmailMessageId: args.gmailMessageId,
+			source: args.source,
+			merchant: args.merchant,
+			sourceMessageId: args.sourceMessageId,
 			orderId: args.orderId,
 			orderDate: args.orderDate,
 			subtotal: args.subtotal,
@@ -259,232 +259,43 @@ export const upsertAmazonOrder = internalMutation({
 			updatedAt: now
 		};
 
-		let orderId: Id<'amazonOrders'>;
+		let orderId: Id<'orders'>;
 		if (existing) {
 			await ctx.db.patch(existing._id, orderDoc);
 			orderId = existing._id;
 			// Replace line items so re-parsing a message stays idempotent.
 			const oldItems = await ctx.db
-				.query('amazonOrderItems')
-				.withIndex('by_amazonOrderId', (q) => q.eq('amazonOrderId', orderId))
+				.query('orderItems')
+				.withIndex('by_orderId', (q) => q.eq('orderId', orderId))
 				.take(200);
 			for (const item of oldItems) {
 				await ctx.db.delete(item._id);
 			}
 		} else {
-			orderId = await ctx.db.insert('amazonOrders', { ...orderDoc, importedAt: now });
+			orderId = await ctx.db.insert('orders', { ...orderDoc, importedAt: now });
 		}
 
 		for (const item of args.items) {
-			// Inherit a previously-resolved AI category for this ASIN so re-parsing/new orders
-			// stay categorized without another AI call.
-			const cachedCategory = item.asin
-				? await ctx.db
-						.query('amazonItemCategories')
-						.withIndex('by_asin', (q) => q.eq('asin', item.asin!))
-						.unique()
-				: null;
-			await ctx.db.insert('amazonOrderItems', {
-				amazonOrderId: orderId,
-				asin: item.asin,
+			await ctx.db.insert('orderItems', {
+				orderId,
+				sku: item.sku,
 				title: item.title,
 				quantity: item.quantity,
 				amount: item.amount,
-				category: cachedCategory?.categorySlug ?? item.category,
-				categorySource: cachedCategory ? 'ai' : undefined,
-				classification: 'dynamic',
 				importedAt: now,
 				updatedAt: now
 			});
-		}
-
-		// When this order matches a transaction, let any ASIN rule (re)classify that transaction.
-		if (match.transactionId) {
-			const asins = args.items.map((item) => item.asin).filter((asin): asin is string => !!asin);
-			await applyAmazonItemRules(ctx, match.transactionId, asins);
 		}
 
 		return { orderId, matched: match.transactionId !== undefined };
 	}
 });
 
-// Apply an active ASIN rule to a matched transaction, unless the user set it manually.
-async function applyAmazonItemRules(
-	ctx: MutationCtx,
-	transactionId: Id<'transactions'>,
-	asins: string[]
-) {
-	if (asins.length === 0) return;
-	const transaction = await ctx.db.get(transactionId);
-	if (!transaction || transaction.removed) return;
-	if (transaction.classificationSource === 'manual') return;
-
-	for (const asin of asins) {
-		const rule = await ctx.db
-			.query('amazonItemRules')
-			.withIndex('by_asin', (q) => q.eq('asin', asin))
-			.unique();
-		if (!rule || !rule.active) continue;
-
-		await ctx.db.patch(transactionId, {
-			classification: rule.classification,
-			classificationSource: 'merchant_rule',
-			classificationConfidence: 1,
-			userCategory: rule.category ?? transaction.userCategory,
-			reviewedAt: Date.now(),
-			updatedAt: Date.now()
-		});
-		return;
-	}
-}
-
-export const markAmazonItem = mutation({
-	args: {
-		transactionId: v.id('transactions'),
-		classification: amazonRuleClassification,
-		category: v.optional(v.string())
-	},
-	handler: async (ctx, args) => {
-		const now = Date.now();
-		const transaction = await ctx.db.get(args.transactionId);
-		if (!transaction || transaction.removed) {
-			throw new Error('Transaction is not available for marking.');
-		}
-
-		const category = normalizeOptionalText(args.category);
-
-		// Collect the ASINs on the order(s) matched to this transaction.
-		const orders = await ctx.db
-			.query('amazonOrders')
-			.withIndex('by_matchedTransactionId', (q) => q.eq('matchedTransactionId', args.transactionId))
-			.take(4);
-		const asinToTitle = new Map<string, string>();
-		for (const order of orders) {
-			const items = await ctx.db
-				.query('amazonOrderItems')
-				.withIndex('by_amazonOrderId', (q) => q.eq('amazonOrderId', order._id))
-				.take(20);
-			for (const item of items) {
-				if (item.asin) asinToTitle.set(item.asin, item.title);
-			}
-		}
-
-		// No ASIN available (e.g. unmatched order): fall back to a single-transaction override.
-		if (asinToTitle.size === 0) {
-			await ctx.db.patch(args.transactionId, {
-				classification: args.classification,
-				classificationSource: 'manual',
-				classificationConfidence: 1,
-				userCategory: category ?? transaction.userCategory,
-				reviewedAt: now,
-				updatedAt: now
-			});
-			return { ok: true, asins: 0, updated: 1 };
-		}
-
-		// Upsert an ASIN rule for each item on the order.
-		for (const [asin, title] of asinToTitle) {
-			const existing = await ctx.db
-				.query('amazonItemRules')
-				.withIndex('by_asin', (q) => q.eq('asin', asin))
-				.unique();
-			const ruleDoc = {
-				asin,
-				title,
-				classification: args.classification,
-				category,
-				active: true,
-				updatedAt: now
-			};
-			if (existing) {
-				await ctx.db.patch(existing._id, ruleDoc);
-			} else {
-				await ctx.db.insert('amazonItemRules', { ...ruleDoc, createdAt: now });
-			}
-		}
-
-		// Apply to every transaction whose matched order contains one of these ASINs.
-		const targetTransactionIds = new Set<Id<'transactions'>>();
-		for (const asin of asinToTitle.keys()) {
-			const items = await ctx.db
-				.query('amazonOrderItems')
-				.withIndex('by_asin', (q) => q.eq('asin', asin))
-				.take(500);
-			for (const item of items) {
-				const order = await ctx.db.get(item.amazonOrderId);
-				if (order?.matchedTransactionId) targetTransactionIds.add(order.matchedTransactionId);
-			}
-		}
-
-		let updated = 0;
-		for (const targetId of targetTransactionIds) {
-			const target = await ctx.db.get(targetId);
-			if (!target || target.removed) continue;
-			// Respect existing manual choices on other transactions; always update the clicked one.
-			const isClicked = targetId === args.transactionId;
-			if (!isClicked && target.classificationSource === 'manual') continue;
-
-			await ctx.db.patch(targetId, {
-				classification: args.classification,
-				classificationSource: isClicked ? 'manual' : 'merchant_rule',
-				classificationConfidence: 1,
-				userCategory: category ?? target.userCategory,
-				reviewedAt: now,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
-		return { ok: true, asins: asinToTitle.size, updated };
-	}
-});
-
-export const unmarkAmazonItem = mutation({
-	args: { asin: v.string() },
-	handler: async (ctx, args) => {
-		const now = Date.now();
-		const rule = await ctx.db
-			.query('amazonItemRules')
-			.withIndex('by_asin', (q) => q.eq('asin', args.asin))
-			.unique();
-		const previousClassification = rule?.classification ?? 'known_recurring';
-		if (rule) await ctx.db.delete(rule._id);
-
-		// Reset transactions matched to orders containing this ASIN back to dynamic.
-		const items = await ctx.db
-			.query('amazonOrderItems')
-			.withIndex('by_asin', (q) => q.eq('asin', args.asin))
-			.take(500);
-		const targetTransactionIds = new Set<Id<'transactions'>>();
-		for (const item of items) {
-			const order = await ctx.db.get(item.amazonOrderId);
-			if (order?.matchedTransactionId) targetTransactionIds.add(order.matchedTransactionId);
-		}
-
-		let updated = 0;
-		for (const targetId of targetTransactionIds) {
-			const target = await ctx.db.get(targetId);
-			if (!target || target.removed) continue;
-			if (target.classification !== previousClassification) continue;
-
-			await ctx.db.patch(targetId, {
-				classification: 'dynamic',
-				classificationSource: 'default',
-				classificationConfidence: undefined,
-				reviewedAt: now,
-				updatedAt: now
-			});
-			updated += 1;
-		}
-
-		return { ok: true, updated };
-	}
-});
-
 async function findTransactionMatch(
 	ctx: MutationCtx,
 	total: number | undefined,
-	orderDate: string | undefined
+	orderDate: string | undefined,
+	merchantMatchers: string[]
 ): Promise<{
 	transactionId?: Id<'transactions'>;
 	confidence?: number;
@@ -504,7 +315,10 @@ async function findTransactionMatch(
 	let best: { id: Id<'transactions'>; distance: number } | undefined;
 	for (const transaction of candidates) {
 		if (transaction.removed) continue;
-		if (!transaction.normalizedMerchant.includes('amazon')) continue;
+		// Only consider charges whose merchant matches this retailer's patterns.
+		if (!merchantMatchers.some((pattern) => transaction.normalizedMerchant.includes(pattern))) {
+			continue;
+		}
 		if (Math.abs(transaction.amount - total) > MATCH_AMOUNT_TOLERANCE) continue;
 		const distance = Math.abs(dateDiffDays(transaction.date, orderDate));
 		if (!best || distance < best.distance) {
@@ -523,11 +337,6 @@ async function findTransactionMatch(
 		confidence,
 		reviewState: confidence >= 0.9 ? 'matched' : 'review'
 	};
-}
-
-function normalizeOptionalText(value?: string) {
-	const normalized = value?.trim();
-	return normalized ? normalized : undefined;
 }
 
 function shiftDate(date: string, days: number) {
