@@ -12,9 +12,7 @@
 		amount: number;
 		kind: 'expense' | 'income' | 'transfer';
 		pending: boolean;
-		categoryPrimary: string | null;
-		categoryDetailed: string | null;
-		userCategory: string | null;
+		category: string;
 		classificationSource: string;
 		source: string;
 		amazonItems?: Array<{ title: string; quantity: number | null; amount: number | null }>;
@@ -23,7 +21,6 @@
 		key: string;
 		normalizedMerchant: string;
 		label: string;
-		category: string | null;
 		total: number;
 		count: number;
 		monthly: number;
@@ -80,12 +77,7 @@
 	}
 
 	function categoryFor(transaction: ExpectedRow) {
-		return (
-			transaction.userCategory ??
-			transaction.categoryDetailed ??
-			transaction.categoryPrimary ??
-			'Uncategorized'
-		);
+		return transaction.category;
 	}
 
 	async function unmarkMerchant(merchant: MerchantRow) {

@@ -8,7 +8,7 @@ import {
 	type QueryCtx
 } from './_generated/server';
 import type { Id } from './_generated/dataModel';
-import { reclassifyCategoryTransactions, treatmentPatch } from './categories';
+import { CATEGORY_OWNED_SOURCES, reclassifyCategoryTransactions, treatmentPatch } from './categories';
 
 const transactionClassification = v.union(
 	v.literal('known_recurring'),
@@ -104,6 +104,7 @@ export const listRecentTransactions = query({
 			endDate: args.endDate,
 			search: args.search
 		});
+		const names = await categoryNameMap(ctx);
 		return Promise.all(
 			rows.map(async (transaction) => ({
 				id: transaction._id,
@@ -114,10 +115,8 @@ export const listRecentTransactions = query({
 				amount: transaction.amount,
 				kind: transaction.kind,
 				pending: transaction.pending,
-				categoryPrimary: transaction.categoryPrimary ?? null,
-				categoryDetailed: transaction.categoryDetailed ?? null,
-				userCategory: transaction.userCategory ?? null,
 				categorySlug: transaction.categorySlug ?? null,
+				category: categoryLabel(names, transaction.categorySlug),
 				classification: transaction.classification,
 				classificationSource: transaction.classificationSource,
 				source: transaction.source,
@@ -228,13 +227,9 @@ export const getDynamicDashboard = query({
 			(transaction) => !transaction.removed && transaction.kind === 'expense'
 		);
 		const total = activeExpenses.reduce((sum, transaction) => sum + transaction.amount, 0);
-		const byCategory = summarizeBy(
-			activeExpenses,
-			(transaction) =>
-				transaction.userCategory ??
-				transaction.categoryDetailed ??
-				transaction.categoryPrimary ??
-				'Uncategorized'
+		const names = await categoryNameMap(ctx);
+		const byCategory = summarizeBy(activeExpenses, (transaction) =>
+			categoryLabel(names, transaction.categorySlug)
 		);
 		const byMerchant = summarizeBy(
 			activeExpenses,
@@ -261,11 +256,7 @@ export const getDynamicDashboard = query({
 				name: transaction.name,
 				merchantName: transaction.merchantName ?? null,
 				amount: transaction.amount,
-				category:
-					transaction.userCategory ??
-					transaction.categoryDetailed ??
-					transaction.categoryPrimary ??
-					'Uncategorized'
+				category: categoryLabel(names, transaction.categorySlug)
 			}))
 		};
 	}
@@ -371,13 +362,9 @@ export const getRecurringSummary = query({
 		const active = rows.filter((transaction) => !transaction.removed);
 		const expenses = active.filter((transaction) => transaction.kind === 'expense');
 		const total = expenses.reduce((sum, transaction) => sum + transaction.amount, 0);
-		const byCategory = summarizeBy(
-			expenses,
-			(transaction) =>
-				transaction.userCategory ??
-				transaction.categoryDetailed ??
-				transaction.categoryPrimary ??
-				'Uncategorized'
+		const names = await categoryNameMap(ctx);
+		const byCategory = summarizeBy(expenses, (transaction) =>
+			categoryLabel(names, transaction.categorySlug)
 		);
 
 		// Amazon recurring is grouped per item (ASIN) rather than lumped under one "amazon" row,
@@ -467,6 +454,7 @@ export const getRecurringTransactions = query({
 			.order('desc')
 			.take(500);
 
+		const names = await categoryNameMap(ctx);
 		return Promise.all(
 			rows
 				.filter((transaction) => !transaction.removed)
@@ -478,9 +466,7 @@ export const getRecurringTransactions = query({
 					amount: transaction.amount,
 					kind: transaction.kind,
 					pending: transaction.pending,
-					categoryPrimary: transaction.categoryPrimary ?? null,
-					categoryDetailed: transaction.categoryDetailed ?? null,
-					userCategory: transaction.userCategory ?? null,
+					category: categoryLabel(names, transaction.categorySlug),
 					classificationSource: transaction.classificationSource,
 					source: transaction.source,
 					amazonItems: await amazonItemsForTransaction(ctx, transaction)
@@ -561,7 +547,6 @@ export const getExpectedSummary = query({
 				key: rule.normalizedPattern,
 				normalizedMerchant: rule.normalizedPattern,
 				label: rule.pattern,
-				category: rule.category ?? null,
 				total,
 				count: expenses.length,
 				monthly: total / Math.max(months.size, 1)
@@ -642,6 +627,7 @@ export const getExpectedTransactions = query({
 			.order('desc')
 			.take(500);
 
+		const names = await categoryNameMap(ctx);
 		return Promise.all(
 			rows
 				.filter((transaction) => !transaction.removed)
@@ -653,9 +639,7 @@ export const getExpectedTransactions = query({
 					amount: transaction.amount,
 					kind: transaction.kind,
 					pending: transaction.pending,
-					categoryPrimary: transaction.categoryPrimary ?? null,
-					categoryDetailed: transaction.categoryDetailed ?? null,
-					userCategory: transaction.userCategory ?? null,
+					category: categoryLabel(names, transaction.categorySlug),
 					classificationSource: transaction.classificationSource,
 					source: transaction.source,
 					amazonItems: await amazonItemsForTransaction(ctx, transaction)
@@ -714,7 +698,6 @@ export const markTransaction = mutation({
 	args: {
 		transactionId: v.id('transactions'),
 		classification: manualTransactionClassification,
-		category: v.optional(v.string()),
 		notes: v.optional(v.string()),
 		createMerchantRule: v.optional(v.boolean()),
 		ruleMatchType: v.optional(v.union(v.literal('exact'), v.literal('contains')))
@@ -727,7 +710,6 @@ export const markTransaction = mutation({
 			throw new Error('Transaction is not available for marking.');
 		}
 
-		const userCategory = normalizeOptionalText(args.category);
 		const pattern = transaction.merchantName ?? transaction.name;
 		const normalizedPattern = transaction.normalizedMerchant;
 		const existingRule = (
@@ -736,12 +718,13 @@ export const markTransaction = mutation({
 				.withIndex('by_normalizedPattern', (q) => q.eq('normalizedPattern', normalizedPattern))
 				.take(1)
 		)[0];
+		// Merchant rules carry only the classification — the category is owned by the canonical
+		// AI taxonomy (categorySlug), never a Plaid string threaded through here.
 		const ruleDoc = {
 			matchType: args.ruleMatchType ?? ('exact' as const),
 			pattern,
 			normalizedPattern,
 			classification: args.classification,
-			category: userCategory,
 			active: true,
 			updatedAt: now
 		};
@@ -768,7 +751,6 @@ export const markTransaction = mutation({
 				classification: args.classification,
 				classificationSource: 'merchant_rule',
 				classificationConfidence: 1,
-				userCategory,
 				notes: normalizeOptionalText(args.notes),
 				reviewedAt: now,
 				updatedAt: now
@@ -822,6 +804,79 @@ export const markCategoryTransfer = mutation({
 	handler: (ctx, args) => markCategoryTreatment(ctx, args.transactionId, 'transfer')
 });
 
+// Manually assign a canonical category to an uncategorized transaction. This also (a) remembers
+// the merchant -> category mapping so future syncs inherit it without an AI call, and (b) applies
+// the destination category's treatment (e.g. `expected`) to the merchant's transactions right away.
+export const setTransactionCategory = mutation({
+	args: {
+		transactionId: v.id('transactions'),
+		categorySlug: v.string()
+	},
+	handler: async (ctx, args) => {
+		const now = Date.now();
+		const transaction = await ctx.db.get(args.transactionId);
+
+		if (!transaction || transaction.removed) {
+			throw new Error('Transaction is not available for categorizing.');
+		}
+
+		const category = await ctx.db
+			.query('categories')
+			.withIndex('by_slug', (q) => q.eq('slug', args.categorySlug))
+			.unique();
+		if (!category || !category.active) {
+			throw new Error('Category not found.');
+		}
+
+		const normalizedMerchant = transaction.normalizedMerchant;
+
+		// Remember this merchant -> category for the future. A manual pick overwrites any cached AI
+		// guess and is inherited by later syncs (see `upsertTransaction`).
+		const existingCache = await ctx.db
+			.query('merchantCategories')
+			.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
+			.unique();
+		const cacheDoc = {
+			normalizedMerchant,
+			categorySlug: args.categorySlug,
+			source: 'manual' as const,
+			active: true,
+			updatedAt: now
+		};
+		if (existingCache) {
+			await ctx.db.patch(existingCache._id, cacheDoc);
+		} else {
+			await ctx.db.insert('merchantCategories', { ...cacheDoc, createdAt: now });
+		}
+
+		// Fan the slug out to every transaction from this merchant. If the destination category is
+		// `expected`/`transfer`, its treatment classifies the ones the category owns (default- or
+		// category-rule-classified) — manual marks and merchant rules still outrank it.
+		const treatment = category.treatment ?? null;
+		const matching = await ctx.db
+			.query('transactions')
+			.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
+			.take(500);
+		let updated = 0;
+		for (const row of matching) {
+			if (row.removed) continue;
+			const classificationPatch =
+				treatment && CATEGORY_OWNED_SOURCES.has(row.classificationSource)
+					? { ...treatmentPatch(treatment), reviewedAt: now }
+					: {};
+			await ctx.db.patch(row._id, {
+				categorySlug: args.categorySlug,
+				categorySource: 'manual',
+				...classificationPatch,
+				updatedAt: now
+			});
+			updated += 1;
+		}
+
+		return { ok: true, category: category.name, slug: args.categorySlug, treatment, updated };
+	}
+});
+
 export const listRules = query({
 	args: {},
 	handler: async (ctx) => {
@@ -835,8 +890,7 @@ export const listRules = query({
 				id: rule._id,
 				pattern: rule.pattern,
 				matchType: rule.matchType,
-				classification: rule.classification,
-				category: rule.category ?? null
+				classification: rule.classification
 			}))
 		};
 	}
@@ -1210,16 +1264,14 @@ async function classifyFromRules(ctx: MutationCtx, normalizedMerchant: string) {
 		return {
 			classification: merchantRule.classification,
 			classificationSource: 'merchant_rule' as const,
-			classificationConfidence: 1,
-			userCategory: merchantRule.category
+			classificationConfidence: 1
 		};
 	}
 
 	return {
 		classification: 'dynamic' as const,
 		classificationSource: 'default' as const,
-		classificationConfidence: undefined,
-		userCategory: undefined
+		classificationConfidence: undefined
 	};
 }
 
@@ -1270,4 +1322,19 @@ function titleCase(slug: string) {
 		.split('-')
 		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
 		.join(' ');
+}
+
+// Canonical slug -> display name, loaded once per query. The category shown anywhere is derived
+// only from the AI taxonomy (categorySlug); Plaid provider categories are never displayed.
+async function categoryNameMap(ctx: QueryCtx) {
+	const categories = await ctx.db
+		.query('categories')
+		.withIndex('by_active', (q) => q.eq('active', true))
+		.take(200);
+	return new Map(categories.map((category) => [category.slug, category.name]));
+}
+
+function categoryLabel(names: Map<string, string>, slug?: string | null) {
+	if (!slug || slug === 'uncategorized') return 'Uncategorized';
+	return names.get(slug) ?? titleCase(slug);
 }

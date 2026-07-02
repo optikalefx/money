@@ -15,9 +15,7 @@
 		amount: number;
 		kind: 'expense' | 'income' | 'transfer';
 		pending: boolean;
-		categoryPrimary: string | null;
-		categoryDetailed: string | null;
-		userCategory?: string | null;
+		category: string;
 		categorySlug?: string | null;
 		classification: Classification;
 		classificationSource: string;
@@ -82,6 +80,7 @@
 	const markAmazonItemMutation = useMutation(api.gmail.markAmazonItem);
 	const markCategoryExpectedMutation = useMutation(api.plaid.markCategoryExpected);
 	const markCategoryTransferMutation = useMutation(api.plaid.markCategoryTransfer);
+	const setTransactionCategoryMutation = useMutation(api.plaid.setTransactionCategory);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',
@@ -90,6 +89,11 @@
 
 	const categoryNames = $derived(
 		new Map((categoriesQuery.data ?? []).map((category) => [category.slug, category.name]))
+	);
+	// Categories the user can pick from the review-queue dropdown (the Uncategorized fallback is
+	// never a target — picking it would be a no-op).
+	const selectableCategories = $derived(
+		(categoriesQuery.data ?? []).filter((category) => category.slug !== 'uncategorized')
 	);
 	const allTransactions = $derived((transactions.data ?? []) as TransactionRow[]);
 	const visibleTransactions = $derived.by(() => {
@@ -107,9 +111,6 @@
 			return [
 				transaction.name,
 				transaction.merchantName,
-				transaction.categoryPrimary,
-				transaction.categoryDetailed,
-				transaction.userCategory,
 				displayCategory(transaction),
 				...(transaction.amazonItems?.map((item) => item.title) ?? [])
 			]
@@ -241,16 +242,6 @@
 		return transaction.classification === 'unreviewed' ? 'dynamic' : transaction.classification;
 	}
 
-	function categoryFor(transaction: {
-		userCategory?: string | null;
-		categoryDetailed: string | null;
-		categoryPrimary: string | null;
-	}) {
-		return (
-			transaction.userCategory ?? transaction.categoryDetailed ?? transaction.categoryPrimary ?? ''
-		);
-	}
-
 	function slugName(slug: string) {
 		return (
 			categoryNames.get(slug) ??
@@ -261,9 +252,15 @@
 		);
 	}
 
-	// The normalized (canonical) category to show in the review queue. Amazon rows carry
-	// per-item categories; everything else uses the transaction's resolved slug. Falls back to
-	// the raw provider category when a row hasn't been categorized yet.
+	// A non-Amazon row with no resolved canonical category. These get a category dropdown in the
+	// review queue instead of a plain "Uncategorized" label. Amazon rows are categorized per item.
+	function isUncategorized(transaction: TransactionRow) {
+		if (transaction.amazonItems && transaction.amazonItems.length) return false;
+		return !transaction.categorySlug || transaction.categorySlug === 'uncategorized';
+	}
+
+	// The canonical category to show in the review queue. Amazon rows carry per-item categories;
+	// everything else uses the backend-resolved category name ('Uncategorized' when uncategorized).
 	function displayCategory(transaction: TransactionRow) {
 		if (transaction.amazonItems && transaction.amazonItems.length) {
 			const names = [
@@ -276,8 +273,7 @@
 			];
 			if (names.length) return names.join(', ');
 		}
-		if (transaction.categorySlug) return slugName(transaction.categorySlug);
-		return categoryFor(transaction) || 'Uncategorized';
+		return transaction.category;
 	}
 
 	// The source line under a merchant in the review queue: the provider ("plaid") plus the
@@ -407,9 +403,6 @@
 			id: Id<'transactions'>;
 			merchantName: string | null;
 			name: string;
-			userCategory?: string | null;
-			categoryDetailed: string | null;
-			categoryPrimary: string | null;
 			amazonItems?: Array<{ title: string }>;
 		},
 		classification: MerchantClassification
@@ -418,15 +411,12 @@
 		errorMessage = '';
 
 		try {
-			const category = categoryFor(transaction);
-
 			// Amazon rows are keyed on the item's ASIN, so repeat purchases auto-classify
 			// without reclassifying every unrelated Amazon transaction.
 			if (transaction.amazonItems && transaction.amazonItems.length) {
 				const result = await markAmazonItemMutation({
 					transactionId: transaction.id,
-					classification,
-					...(category ? { category } : {})
+					classification
 				});
 				const label = transaction.amazonItems[0].title;
 				statusMessage = `${label} will now be treated as ${classificationLabel(classification)} (${result.updated} matching transaction${result.updated === 1 ? '' : 's'}).`;
@@ -437,8 +427,7 @@
 				transactionId: transaction.id,
 				classification,
 				createMerchantRule: true,
-				ruleMatchType: 'exact',
-				...(category ? { category } : {})
+				ruleMatchType: 'exact'
 			});
 			statusMessage = `${transaction.merchantName ?? transaction.name} will now be treated as ${classificationLabel(classification)}.`;
 		} catch (error) {
@@ -448,11 +437,7 @@
 		}
 	}
 
-	async function markExpectedCategory(transaction: {
-		id: Id<'transactions'>;
-		categoryDetailed: string | null;
-		categoryPrimary: string | null;
-	}) {
+	async function markExpectedCategory(transaction: { id: Id<'transactions'> }) {
 		markingTransactionId = transaction.id;
 		errorMessage = '';
 
@@ -469,11 +454,28 @@
 		}
 	}
 
-	async function markTransferCategory(transaction: {
-		id: Id<'transactions'>;
-		categoryDetailed: string | null;
-		categoryPrimary: string | null;
-	}) {
+	async function assignCategory(transaction: { id: Id<'transactions'> }, categorySlug: string) {
+		if (!categorySlug) return;
+		markingTransactionId = transaction.id;
+		errorMessage = '';
+
+		try {
+			const result = await setTransactionCategoryMutation({
+				transactionId: transaction.id,
+				categorySlug
+			});
+			statusMessage =
+				result.treatment === 'expected'
+					? `${result.category} is expected — moved out of the review queue (${result.updated} updated).`
+					: `Categorized as ${result.category} (${result.updated} updated).`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to set category.';
+		} finally {
+			markingTransactionId = null;
+		}
+	}
+
+	async function markTransferCategory(transaction: { id: Id<'transactions'> }) {
 		markingTransactionId = transaction.id;
 		errorMessage = '';
 
@@ -831,7 +833,20 @@
 								</td>
 								<td data-label="Category">
 									<div class="category-stack">
-										<span>{displayCategory(transaction)}</span>
+										{#if isUncategorized(transaction)}
+											<select
+												class="category-select"
+												disabled={markingTransactionId === transaction.id}
+												onchange={(event) => assignCategory(transaction, event.currentTarget.value)}
+											>
+												<option value="" selected>Uncategorized</option>
+												{#each selectableCategories as category (category.slug)}
+													<option value={category.slug}>{category.name}</option>
+												{/each}
+											</select>
+										{:else}
+											<span>{displayCategory(transaction)}</span>
+										{/if}
 									</div>
 								</td>
 								<td class="amount-column" data-label="Amount">{formatAmount(transaction.amount)}</td
@@ -924,6 +939,9 @@
 	}
 
 	.hero-nav {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 1.5rem;
 		margin-top: 1.25rem;
 	}
 
@@ -1413,6 +1431,25 @@
 		display: grid;
 		gap: 0.35rem;
 		align-items: start;
+	}
+
+	.category-select {
+		width: 100%;
+		min-height: 2.4rem;
+		padding: 0.45rem 0.6rem;
+		color: var(--color-foreground);
+		background: rgb(254 254 250 / 78%);
+		border: 1px solid rgb(222 216 207 / 80%);
+		border-radius: var(--radius-pill);
+		font: inherit;
+		font-size: 0.82rem;
+		font-weight: 800;
+		cursor: pointer;
+	}
+
+	.category-select:disabled {
+		cursor: not-allowed;
+		opacity: 0.58;
 	}
 
 	.text-action {

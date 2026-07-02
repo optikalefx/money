@@ -4,6 +4,8 @@
 	import { api } from '../../convex/_generated/api.js';
 	import type { Id } from '../../convex/_generated/dataModel.js';
 	import SuggestionTransactions from '$lib/SuggestionTransactions.svelte';
+	import Section from '$lib/Section.svelte';
+	import ActionsMenu from '$lib/ActionsMenu.svelte';
 
 	type CategoryTreatment = 'expected' | 'transfer' | null;
 	type CategoryRow = {
@@ -293,13 +295,7 @@
 	</section>
 
 	{#if suggestionRows.length}
-		<section class="suggest-panel organic-surface">
-			<div class="section-heading">
-				<div>
-					<p class="eyebrow">AI suggestions</p>
-					<h2>New categories from your Uncategorized spend</h2>
-				</div>
-			</div>
+		<Section eyebrow="AI suggestions" title="New categories from your Uncategorized spend">
 			<div class="suggestion-list">
 				{#each suggestionRows as suggestion (suggestion.id)}
 					{@const isExpanded = expandedSuggestionId === suggestion.id}
@@ -354,11 +350,10 @@
 					</article>
 				{/each}
 			</div>
-		</section>
+		</Section>
 	{/if}
 
-	<section class="add-panel organic-surface">
-		<h2>Add a category</h2>
+	<Section eyebrow="New category" title="Add a category">
 		<div class="add-row">
 			<label>
 				<span>Name</span>
@@ -381,79 +376,79 @@
 				Add
 			</button>
 		</div>
-	</section>
+	</Section>
 
-	<section class="list-section">
+	<Section eyebrow="Your categories" title="Categories you already have">
 		{#if categories.isLoading}
 			<div class="empty-state">Loading categories...</div>
 		{:else}
-			<div class="category-list">
-				{#each rows as row (row.id)}
-					{@const draft = draftFor(row)}
-					<article class="category-card organic-surface">
-						<div class="card-main">
-							<label class="name-field">
-								<span>Name</span>
-								<input
-									type="text"
-									value={draft.name}
-									oninput={(event) => updateDraft(row, { name: event.currentTarget.value })}
-								/>
-							</label>
-							<label class="desc-field">
-								<span
-									>AI guidance {#if row.isDefault}<em>· default</em>{/if}</span
-								>
-								<textarea
-									rows="2"
-									value={draft.description}
-									oninput={(event) => updateDraft(row, { description: event.currentTarget.value })}
-									placeholder="Optional"></textarea>
-							</label>
-							{#if row.slug !== 'uncategorized'}
-								<label class="treatment-field">
-									<span>Treatment</span>
-									<select
-										value={row.treatment ?? 'dynamic'}
-										onchange={(event) =>
-											changeTreatment(
-												row,
-												event.currentTarget.value === 'dynamic'
-													? null
-													: (event.currentTarget.value as CategoryTreatment)
-											)}
+			<div class="category-table">
+				<table>
+					<thead>
+						<tr>
+							<th scope="col" class="name-col">Name</th>
+							<th scope="col">AI guidance</th>
+							<th scope="col" class="actions-col"></th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each rows as row (row.id)}
+							{@const draft = draftFor(row)}
+							<tr>
+								<td class="name-cell">
+									<input
+										type="text"
+										value={draft.name}
+										oninput={(event) => updateDraft(row, { name: event.currentTarget.value })}
+									/>
+								</td>
+								<td class="desc-cell">
+									<textarea
+										rows="2"
+										value={draft.description}
+										oninput={(event) =>
+											updateDraft(row, { description: event.currentTarget.value })}
+										placeholder={row.isDefault ? 'Optional · default' : 'Optional'}
+									></textarea>
+								</td>
+								<td class="actions-cell">
+									<div class="cell-actions">
+									<button
+										type="button"
+										class="button button-outline"
+										disabled={!isDirty(row) || savingId === row.id}
+										onclick={() => saveRow(row)}
 									>
-										<option value="dynamic">Dynamic</option>
-										<option value="expected">Expected</option>
-										<option value="transfer">Transfer (ignore)</option>
-									</select>
-								</label>
-							{/if}
-						</div>
-						<div class="card-actions">
-							<button
-								type="button"
-								class="button button-outline"
-								disabled={!isDirty(row) || savingId === row.id}
-								onclick={() => saveRow(row)}
-							>
-								{savingId === row.id ? 'Saving...' : 'Save'}
-							</button>
-							{#if row.slug !== 'uncategorized'}
-								<button
-									type="button"
-									class="text-action delete"
-									onclick={() => removeCategory(row)}
-								>
-									Delete
-								</button>
-							{/if}
-						</div>
-					</article>
-				{/each}
+										{savingId === row.id ? 'Saving...' : 'Save'}
+									</button>
+									{#if row.slug !== 'uncategorized'}
+										<ActionsMenu
+											items={[
+												{
+													label: 'Mark as Expected',
+													active: row.treatment === 'expected',
+													onSelect: () =>
+														changeTreatment(row, row.treatment === 'expected' ? null : 'expected')
+												},
+												{
+													label: 'Ignore as Transfer',
+													active: row.treatment === 'transfer',
+													onSelect: () =>
+														changeTreatment(row, row.treatment === 'transfer' ? null : 'transfer')
+												},
+												{ label: 'Delete', destructive: true, onSelect: () => removeCategory(row) }
+											]}
+										/>
+									{/if}
+									</div>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
 			</div>
 		{/if}
-	</section>
+	</Section>
 </main>
 
 <style>
@@ -506,8 +501,7 @@
 		color: var(--color-destructive);
 	}
 
-	.ai-panel,
-	.add-panel {
+	.ai-panel {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 1rem;
@@ -552,21 +546,6 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.6rem;
-	}
-
-	.suggest-panel {
-		margin-bottom: 1.25rem;
-		padding: 1.5rem;
-		border-radius: 2rem 3.5rem 2rem 2.75rem;
-	}
-
-	.section-heading {
-		margin-bottom: 1.25rem;
-	}
-
-	.section-heading h2 {
-		margin: 0.25rem 0 0;
-		font-size: clamp(1.3rem, 3vw, 1.8rem);
 	}
 
 	.suggestion-list {
@@ -646,15 +625,6 @@
 		}
 	}
 
-	.add-panel {
-		display: block;
-	}
-
-	.add-panel h2 {
-		margin: 0 0 0.75rem;
-		font-size: 1.2rem;
-	}
-
 	.add-row {
 		display: flex;
 		flex-wrap: wrap;
@@ -693,39 +663,74 @@
 		resize: vertical;
 	}
 
-	.category-list {
-		display: grid;
-		gap: 1rem;
+	.category-table {
+		overflow-x: auto;
 	}
 
-	.category-card {
-		display: flex;
-		gap: 1.5rem;
-		align-items: stretch;
-		justify-content: space-between;
-		padding: 1.25rem 1.5rem;
-		border-radius: 1.4rem 2.2rem 1.5rem 1.9rem;
+	.category-table table {
+		width: 100%;
+		border-collapse: collapse;
 	}
 
-	.card-main {
-		display: grid;
-		grid-template-columns: minmax(10rem, 0.5fr) minmax(0, 1.5fr);
-		gap: 1rem;
-		flex: 1;
-	}
-
-	.desc-field span em {
-		color: var(--color-primary);
-		font-style: normal;
+	.category-table thead th {
+		padding: 0.4rem 0.75rem;
+		color: var(--color-muted-foreground);
+		font-size: 0.72rem;
 		font-weight: 900;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		text-align: left;
 	}
 
-	.card-actions {
+	.category-table tbody td {
+		padding: 0.4rem 0.75rem;
+		border-top: 1px solid rgb(222 216 207 / 55%);
+		vertical-align: middle;
+	}
+
+	.category-table input,
+	.category-table textarea {
+		min-height: 2.3rem;
+		padding: 0.4rem 0.7rem;
+	}
+
+	.category-table textarea {
+		min-height: 2.3rem;
+		border-radius: 0.75rem;
+	}
+
+	/* Fixed name + compact actions, so AI guidance takes all remaining width. */
+	.name-col,
+	.name-cell {
+		width: 12rem;
+	}
+
+	/* Enforce the minimum on the input so table auto-layout can't collapse the column. */
+	.name-cell input {
+		min-width: 9rem;
+	}
+
+	.desc-cell {
+		width: 100%;
+	}
+
+	.actions-cell {
+		width: 1%;
+		white-space: nowrap;
+	}
+
+	.cell-actions {
 		display: flex;
-		flex-direction: column;
-		gap: 0.6rem;
-		align-items: end;
-		justify-content: center;
+		gap: 0.5rem;
+		align-items: center;
+		justify-content: flex-end;
+	}
+
+	.cell-actions :global(.actions-trigger) {
+		width: auto;
+		min-height: 2.3rem;
+		padding: 0.45rem 0.9rem;
+		font-size: 0.78rem;
 	}
 
 	.text-action {
@@ -739,10 +744,6 @@
 		cursor: pointer;
 	}
 
-	.text-action.delete:hover {
-		color: var(--color-destructive);
-	}
-
 	.button:disabled {
 		cursor: not-allowed;
 		opacity: 0.55;
@@ -754,16 +755,11 @@
 	}
 
 	@media (max-width: 760px) {
-		.category-card,
-		.card-main {
-			flex-direction: column;
-			grid-template-columns: 1fr;
-		}
-
-		.card-actions {
-			flex-direction: row;
-			align-items: center;
-			justify-content: flex-start;
+		.name-col,
+		.name-cell,
+		.desc-cell {
+			width: auto;
+			min-width: 8rem;
 		}
 	}
 </style>

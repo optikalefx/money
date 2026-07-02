@@ -130,7 +130,6 @@ export default defineSchema({
 			v.literal('expected'),
 			v.literal('dynamic')
 		),
-		category: v.optional(v.string()),
 		expectedMonthlyAmount: v.optional(v.number()),
 		active: v.boolean(),
 		createdAt: v.number(),

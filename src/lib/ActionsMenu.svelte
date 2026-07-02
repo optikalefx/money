@@ -2,36 +2,44 @@
 	import tippy, { type Instance } from 'tippy.js';
 	import 'tippy.js/dist/tippy.css';
 
+	type ActionItem = {
+		label: string;
+		onSelect: () => void;
+		destructive?: boolean;
+		active?: boolean;
+	};
+
 	let {
 		disabled = false,
 		showCategoryActions = true,
+		items,
 		onExpectedMerchant,
 		onExpectedCategory,
 		onIgnoreTransfer
 	}: {
 		disabled?: boolean;
 		showCategoryActions?: boolean;
+		items?: ActionItem[];
 		onExpectedMerchant?: () => void;
 		onExpectedCategory?: () => void;
 		onIgnoreTransfer?: () => void;
 	} = $props();
 
+	// Fall back to the legacy named-callback API when no explicit `items` are passed.
+	const resolvedItems = $derived<ActionItem[]>(
+		items ?? [
+			{ label: 'Expected merchant', onSelect: () => onExpectedMerchant?.() },
+			...(showCategoryActions
+				? [
+						{ label: 'Expected category', onSelect: () => onExpectedCategory?.() },
+						{ label: 'Ignore as transfer', onSelect: () => onIgnoreTransfer?.() }
+					]
+				: [])
+		]
+	);
+
 	let trigger: HTMLButtonElement;
 	let menu: HTMLDivElement;
-
-	function runAction(action: string | undefined) {
-		switch (action) {
-			case 'expected-merchant':
-				onExpectedMerchant?.();
-				break;
-			case 'expected-category':
-				onExpectedCategory?.();
-				break;
-			case 'ignore-transfer':
-				onIgnoreTransfer?.();
-				break;
-		}
-	}
 
 	$effect(() => {
 		const instance: Instance = tippy(trigger, {
@@ -49,10 +57,11 @@
 		// tippy moves `menu` under document.body, outside Svelte's delegated event root,
 		// so wire the clicks up manually rather than relying on Svelte onclick handlers.
 		const handleClick = (event: MouseEvent) => {
-			const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
+			const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-index]');
 			if (!button) return;
 			instance.hide();
-			runAction(button.dataset.action);
+			// Read the live derived list at click time so the latest handlers/labels win.
+			resolvedItems[Number(button.dataset.index)]?.onSelect();
 		};
 		menu.addEventListener('click', handleClick);
 
@@ -66,11 +75,11 @@
 <button bind:this={trigger} type="button" class="actions-trigger" {disabled}>Actions</button>
 
 <div bind:this={menu} class="actions-menu" hidden>
-	<button type="button" data-action="expected-merchant">Expected merchant</button>
-	{#if showCategoryActions}
-		<button type="button" data-action="expected-category">Expected category</button>
-		<button type="button" data-action="ignore-transfer">Ignore as transfer</button>
-	{/if}
+	{#each resolvedItems as item, index (index)}
+		<button type="button" data-index={index} class:destructive={item.destructive}>
+			{#if item.active}<span class="check" aria-hidden="true">✓</span>{/if}{item.label}
+		</button>
+	{/each}
 </div>
 
 <style>
@@ -125,5 +134,15 @@
 
 	.actions-menu button:hover {
 		background: rgb(230 220 205 / 55%);
+	}
+
+	.actions-menu button.destructive {
+		color: var(--color-destructive);
+	}
+
+	.actions-menu .check {
+		margin-right: 0.35rem;
+		color: var(--color-primary);
+		font-weight: 900;
 	}
 </style>

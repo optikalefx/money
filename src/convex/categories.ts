@@ -289,11 +289,15 @@ export const getCategorizationInput = internalQuery({
 			string,
 			{ normalizedMerchant: string; name: string; plaidCategory: string }
 		>();
+		// Merchants that already have a cached category but still have uncategorized transactions:
+		// no AI needed, but we must fan the cached slug out to those transactions.
+		const cachedMerchants = new Map<string, { normalizedMerchant: string; categorySlug: string }>();
 		for (const row of [...dynamicRows, ...unreviewedRows]) {
 			if (row.removed || row.kind !== 'expense') continue;
 			if (!force && row.categorySlug) continue;
 			if (row.normalizedMerchant.includes('amazon')) continue;
-			if (merchantUnits.has(row.normalizedMerchant)) continue;
+			if (merchantUnits.has(row.normalizedMerchant) || cachedMerchants.has(row.normalizedMerchant))
+				continue;
 			if (!force) {
 				const cached = await ctx.db
 					.query('merchantCategories')
@@ -301,7 +305,13 @@ export const getCategorizationInput = internalQuery({
 						q.eq('normalizedMerchant', row.normalizedMerchant)
 					)
 					.take(1);
-				if (cached[0]) continue;
+				if (cached[0]) {
+					cachedMerchants.set(row.normalizedMerchant, {
+						normalizedMerchant: row.normalizedMerchant,
+						categorySlug: cached[0].categorySlug
+					});
+					continue;
+				}
 			}
 			merchantUnits.set(row.normalizedMerchant, {
 				normalizedMerchant: row.normalizedMerchant,
@@ -313,14 +323,26 @@ export const getCategorizationInput = internalQuery({
 		// Amazon ASIN units from parsed order items without a cached category.
 		const items = await ctx.db.query('amazonOrderItems').order('desc').take(SCAN_LIMIT);
 		const asinUnits = new Map<string, { asin: string; title: string }>();
+		// ASINs already cached but not yet applied everywhere — fan out without re-hitting the AI.
+		const cachedAsins = new Map<
+			string,
+			{ asin: string; title: string; categorySlug: string }
+		>();
 		for (const item of items) {
-			if (!item.asin || asinUnits.has(item.asin)) continue;
+			if (!item.asin || asinUnits.has(item.asin) || cachedAsins.has(item.asin)) continue;
 			if (!force) {
 				const cached = await ctx.db
 					.query('amazonItemCategories')
 					.withIndex('by_asin', (q) => q.eq('asin', item.asin!))
 					.take(1);
-				if (cached[0]) continue;
+				if (cached[0]) {
+					cachedAsins.set(item.asin, {
+						asin: item.asin,
+						title: item.title,
+						categorySlug: cached[0].categorySlug
+					});
+					continue;
+				}
 			}
 			asinUnits.set(item.asin, { asin: item.asin, title: item.title });
 		}
@@ -330,7 +352,9 @@ export const getCategorizationInput = internalQuery({
 			aiProvider: config?.aiProvider ?? DEFAULT_AI_CONFIG.aiProvider,
 			aiModel: config?.aiModel ?? DEFAULT_AI_CONFIG.aiModel,
 			merchantUnits: [...merchantUnits.values()],
-			asinUnits: [...asinUnits.values()]
+			asinUnits: [...asinUnits.values()],
+			cachedMerchants: [...cachedMerchants.values()],
+			cachedAsins: [...cachedAsins.values()]
 		};
 	}
 });
@@ -365,7 +389,7 @@ export const saveCategoryAssignments = internalMutation({
 // (re)stamp transactions whose classification came from the default or a prior category treatment.
 export type CategoryTreatment = 'expected' | 'transfer' | null | undefined;
 
-const CATEGORY_OWNED_SOURCES = new Set(['default', 'category_rule']);
+export const CATEGORY_OWNED_SOURCES = new Set(['default', 'category_rule']);
 
 // The classification/kind a category treatment implies. `null` treatment resets to plain dynamic.
 export function treatmentPatch(treatment: CategoryTreatment): {
