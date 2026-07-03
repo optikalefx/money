@@ -794,6 +794,7 @@
 							{@const busy = markingRowKey === key}
 							{@const short = truncateWords(line.title, 6)}
 							{@const isCategorized = line.categorySlug !== 'uncategorized'}
+							{@const itemPrimary = Boolean(line.orderSource && line.sku)}
 							<tr>
 								<td data-label="Date">{row.date}</td>
 								<td data-label="Merchant">
@@ -824,34 +825,49 @@
 								<td class="amount-column" data-label="Amount">{formatAmount(line.amount)}</td>
 								<td data-label="Actions">
 									<div class="mark-actions">
-										<button
-											type="button"
-											title="Treat this merchant as recurring"
-											disabled={busy}
-											onclick={() => markMerchant(row, 'known_recurring')}
-										>
-											Recurring merchant
-										</button>
+										{#if itemPrimary}
+											<button
+												type="button"
+												title="Treat this item as recurring"
+												disabled={busy}
+												onclick={() => markItem(row, 'known_recurring')}
+											>
+												Recurring item
+											</button>
+										{:else}
+											<button
+												type="button"
+												title="Treat this merchant as recurring"
+												disabled={busy}
+												onclick={() => markMerchant(row, 'known_recurring')}
+											>
+												Recurring merchant
+											</button>
+										{/if}
 										<ActionsMenu
 											disabled={busy}
 											items={[
-												{
-													label: 'Expected merchant',
-													onSelect: () => markMerchant(row, 'expected')
-												},
-												{
-													label: 'Ignore as transfer',
-													onSelect: () => markMerchant(row, 'transfer')
-												},
-												...(line.sku
-													? [
+												...(itemPrimary
+													? [{ label: 'Expected item', onSelect: () => markItem(row, 'expected') }]
+													: [
 															{
-																label: 'Recurring item',
-																onSelect: () => markItem(row, 'known_recurring')
+																label: 'Expected merchant',
+																onSelect: () => markMerchant(row, 'expected')
 															},
-															{ label: 'Expected item', onSelect: () => markItem(row, 'expected') }
-														]
-													: []),
+															{
+																label: 'Ignore as transfer',
+																onSelect: () => markMerchant(row, 'transfer')
+															},
+															...(line.sku
+																? [
+																		{
+																			label: 'Recurring item',
+																			onSelect: () => markItem(row, 'known_recurring')
+																		},
+																		{ label: 'Expected item', onSelect: () => markItem(row, 'expected') }
+																	]
+																: [])
+														]),
 												...(isCategorized
 													? [
 															{
