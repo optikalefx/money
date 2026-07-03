@@ -3,9 +3,32 @@ import { action, env, type ActionCtx } from './_generated/server';
 import { api, internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 import { RETAILER_ADAPTERS, type GmailMessage } from './adapters';
+import { faker } from '@faker-js/faker/locale/en';
 
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 const MAX_MESSAGE_PAGES = 10;
+
+// Stable 32-bit hash so a given key always seeds Faker the same way.
+function hashKey(value: string): number {
+	let hash = 0;
+	for (let i = 0; i < value.length; i++) {
+		hash = (Math.imul(hash, 31) + value.charCodeAt(i)) | 0;
+	}
+	return Math.abs(hash);
+}
+
+// When FAKE_PRODUCT_NAMES is enabled we replace the real Amazon item title with a fake product
+// name, so a non-production deployment (e.g. testing against a real Gmail inbox) never stores or
+// displays what was actually purchased. Seeded by sku (falling back to the real title) so the same
+// product always maps to the same fake name across imports — keeping display stable and the
+// `(merchant, sku)` category cache meaningful. Off by default: production simply doesn't set the
+// var, so real titles are preserved.
+function displayTitle(realTitle: string, sku?: string): string {
+	const envVars = env as unknown as Record<string, string | undefined>;
+	if (envVars.FAKE_PRODUCT_NAMES !== 'true') return realTitle;
+	faker.seed(hashKey(sku ?? realTitle));
+	return faker.commerce.productName();
+}
 
 function requireGoogleConfig() {
 	const clientId = env.GOOGLE_CLIENT_ID;
@@ -91,7 +114,7 @@ export const syncGmail = action({
 							total: order.total,
 							isoCurrencyCode: 'USD',
 							items: order.items.map((item) => ({
-								title: item.title,
+								title: displayTitle(item.title, item.sku),
 								quantity: item.quantity,
 								amount: item.amount,
 								sku: item.sku
