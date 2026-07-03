@@ -112,7 +112,7 @@ http.route({
 
 		return page(
 			'Gmail connected',
-			`${email ?? 'Your account'} is now linked. You can sync Amazon orders.`
+			`${email ?? 'Your account'} is now linked. You can sync your orders.`
 		);
 	})
 });

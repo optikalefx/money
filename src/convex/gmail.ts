@@ -6,7 +6,8 @@ import {
 	query,
 	type MutationCtx
 } from './_generated/server';
-import type { Id } from './_generated/dataModel';
+import type { Doc, Id } from './_generated/dataModel';
+import { RETAILER_ADAPTERS } from './adapters';
 
 const connectionStatus = v.union(
 	v.literal('connected'),
@@ -206,6 +207,41 @@ export const markGmailError = internalMutation({
 	}
 });
 
+// One-shot maintenance: re-bind every order to an owning transaction. Unlike the sync-time
+// `rebindUnmatchedOrders` (which only upgrades to a newly-arrived real charge), this also stands up
+// a synthetic charge for orders imported before standalone binding existed. Safe to re-run.
+export const reconcileOrderBindings = internalMutation({
+	args: {},
+	handler: async (ctx) => {
+		const matchersByMerchant = new Map(
+			RETAILER_ADAPTERS.map((adapter) => [adapter.merchant, adapter.merchantMatchers])
+		);
+		const orders = await ctx.db.query('orders').take(4000);
+		let bound = 0;
+		for (const order of orders) {
+			const matchers = matchersByMerchant.get(order.merchant) ?? [order.merchant];
+			const binding = await resolveOrderBinding(
+				ctx,
+				{
+					total: order.total,
+					orderDate: order.orderDate,
+					merchant: order.merchant,
+					currentMatchedTransactionId: order.matchedTransactionId
+				},
+				matchers
+			);
+			await ctx.db.patch(order._id, {
+				matchedTransactionId: binding.matchedTransactionId,
+				reviewState: binding.reviewState,
+				matchConfidence: binding.matchConfidence,
+				updatedAt: Date.now()
+			});
+			if (binding.matchedTransactionId) bound += 1;
+		}
+		return { scanned: orders.length, bound };
+	}
+});
+
 export const upsertOrder = internalMutation({
 	args: {
 		source: v.literal('gmail'),
@@ -240,7 +276,18 @@ export const upsertOrder = internalMutation({
 						.take(1)
 				)[0];
 
-		const match = await findTransactionMatch(ctx, args.total, args.orderDate, args.merchantMatchers);
+		// Bind the order to an owning transaction: a real Plaid charge if the matcher finds one, else a
+		// synthetic `gmail` transaction so the order (and its items) is visible on its own.
+		const binding = await resolveOrderBinding(
+			ctx,
+			{
+				total: args.total,
+				orderDate: args.orderDate,
+				merchant: args.merchant,
+				currentMatchedTransactionId: existing?.matchedTransactionId
+			},
+			args.merchantMatchers
+		);
 		const orderDoc = {
 			source: args.source,
 			merchant: args.merchant,
@@ -252,9 +299,9 @@ export const upsertOrder = internalMutation({
 			shipping: args.shipping,
 			total: args.total,
 			isoCurrencyCode: args.isoCurrencyCode,
-			reviewState: match.reviewState,
-			matchedTransactionId: match.transactionId,
-			matchConfidence: match.confidence,
+			reviewState: binding.reviewState,
+			matchedTransactionId: binding.matchedTransactionId,
+			matchConfidence: binding.matchConfidence,
 			raw: args.raw,
 			updatedAt: now
 		};
@@ -287,7 +334,7 @@ export const upsertOrder = internalMutation({
 			});
 		}
 
-		return { orderId, matched: match.transactionId !== undefined };
+		return { orderId, matched: binding.reviewState !== 'unmatched' };
 	}
 });
 
@@ -315,6 +362,8 @@ async function findTransactionMatch(
 	let best: { id: Id<'transactions'>; distance: number } | undefined;
 	for (const transaction of candidates) {
 		if (transaction.removed) continue;
+		// Only reconcile against real bank charges, never another order's synthetic gmail transaction.
+		if (transaction.source !== 'plaid') continue;
 		// Only consider charges whose merchant matches this retailer's patterns.
 		if (!merchantMatchers.some((pattern) => transaction.normalizedMerchant.includes(pattern))) {
 			continue;
@@ -337,6 +386,131 @@ async function findTransactionMatch(
 		confidence,
 		reviewState: confidence >= 0.9 ? 'matched' : 'review'
 	};
+}
+
+// The minimum an order needs to stand up as its own charge: a positive total on a dated day.
+type OrderBindingInput = {
+	total?: number;
+	orderDate?: string;
+	merchant: string;
+	currentMatchedTransactionId?: Id<'transactions'>;
+};
+
+type OrderBinding = {
+	matchedTransactionId?: Id<'transactions'>;
+	reviewState: 'unmatched' | 'matched' | 'review';
+	matchConfidence?: number;
+};
+
+// A human display label for a canonical merchant slug ('amazon' → 'Amazon', 'best-buy' → 'Best Buy').
+function retailerLabel(merchant: string): string {
+	return merchant
+		.split(/[-_\s]+/)
+		.filter(Boolean)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(' ');
+}
+
+// The synthetic transaction an order currently owns (if any). An order's `matchedTransactionId`
+// points either at a real Plaid charge or at the synthetic `gmail` charge we minted for it; only the
+// latter (`source: 'gmail'`) is ours to patch or delete.
+async function loadOwnedSynthetic(
+	ctx: MutationCtx,
+	transactionId?: Id<'transactions'>
+): Promise<Doc<'transactions'> | null> {
+	if (!transactionId) return null;
+	const transaction = await ctx.db.get(transactionId);
+	return transaction && transaction.source === 'gmail' ? transaction : null;
+}
+
+// Create (or update) the synthetic charge that carries a standalone order. It is just the WHERE +
+// money; the order's parsed items resolve as its line items at read time. The retailer is carried by
+// `normalizedMerchant`, so this is store-agnostic (Amazon today, Walmart or any adapter tomorrow).
+async function upsertSyntheticTransaction(
+	ctx: MutationCtx,
+	existingId: Id<'transactions'> | undefined,
+	order: OrderBindingInput & { total: number; orderDate: string }
+): Promise<Id<'transactions'>> {
+	const now = Date.now();
+	const label = retailerLabel(order.merchant);
+	const doc = {
+		source: 'gmail' as const,
+		date: order.orderDate,
+		name: `${label} order`,
+		merchantName: label,
+		normalizedMerchant: order.merchant,
+		amount: order.total,
+		kind: 'expense' as const,
+		pending: false,
+		removed: false,
+		updatedAt: now
+	};
+	if (existingId) {
+		await ctx.db.patch(existingId, doc);
+		return existingId;
+	}
+	return await ctx.db.insert('transactions', { ...doc, importedAt: now });
+}
+
+// Decide which transaction owns an order, keeping "counted exactly once" true by construction:
+// a real Plaid charge wins (and any synthetic is discarded); otherwise the order stands on its own
+// synthetic charge when it has a usable total; otherwise it stays unbound (a parse failure).
+async function resolveOrderBinding(
+	ctx: MutationCtx,
+	order: OrderBindingInput,
+	merchantMatchers: string[]
+): Promise<OrderBinding> {
+	const existingSynthetic = await loadOwnedSynthetic(ctx, order.currentMatchedTransactionId);
+	const match = await findTransactionMatch(ctx, order.total, order.orderDate, merchantMatchers);
+
+	if (match.transactionId) {
+		if (existingSynthetic) await ctx.db.delete(existingSynthetic._id);
+		return {
+			matchedTransactionId: match.transactionId,
+			reviewState: match.reviewState,
+			matchConfidence: match.confidence
+		};
+	}
+
+	if (order.total !== undefined && order.total > 0 && order.orderDate) {
+		const syntheticId = await upsertSyntheticTransaction(ctx, existingSynthetic?._id, {
+			...order,
+			total: order.total,
+			orderDate: order.orderDate
+		});
+		return { matchedTransactionId: syntheticId, reviewState: 'unmatched' };
+	}
+
+	// Nothing to bind to (missing/zero total). Drop any stale synthetic so it can't linger as noise.
+	if (existingSynthetic) await ctx.db.delete(existingSynthetic._id);
+	return { matchedTransactionId: undefined, reviewState: 'unmatched' };
+}
+
+// After a Plaid sync brings in new charges, upgrade any order still standing on a synthetic charge
+// (or fully unbound) whose real bank charge has now arrived: re-point it and drop the synthetic.
+export async function rebindUnmatchedOrders(ctx: MutationCtx) {
+	const matchersByMerchant = new Map(
+		RETAILER_ADAPTERS.map((adapter) => [adapter.merchant, adapter.merchantMatchers])
+	);
+	const orders = await ctx.db
+		.query('orders')
+		.withIndex('by_reviewState', (q) => q.eq('reviewState', 'unmatched'))
+		.take(2000);
+
+	for (const order of orders) {
+		const matchers = matchersByMerchant.get(order.merchant) ?? [order.merchant];
+		const match = await findTransactionMatch(ctx, order.total, order.orderDate, matchers);
+		if (!match.transactionId) continue; // still no real charge — leave the standalone as-is.
+
+		const synthetic = await loadOwnedSynthetic(ctx, order.matchedTransactionId);
+		if (synthetic) await ctx.db.delete(synthetic._id);
+		await ctx.db.patch(order._id, {
+			matchedTransactionId: match.transactionId,
+			reviewState: match.reviewState,
+			matchConfidence: match.confidence,
+			updatedAt: Date.now()
+		});
+	}
 }
 
 function shiftDate(date: string, days: number) {

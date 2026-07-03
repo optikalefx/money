@@ -17,7 +17,7 @@ function hashKey(value: string): number {
 	return Math.abs(hash);
 }
 
-// When FAKE_PRODUCT_NAMES is enabled we replace the real Amazon item title with a fake product
+// When FAKE_PRODUCT_NAMES is enabled we replace the real order item title with a fake product
 // name, so a non-production deployment (e.g. testing against a real Gmail inbox) never stores or
 // displays what was actually purchased. Seeded by sku (falling back to the real title) so the same
 // product always maps to the same fake name across imports — keeping display stable and the

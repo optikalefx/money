@@ -7,7 +7,9 @@ const connectionStatus = v.union(
 	v.literal('error'),
 	v.literal('disabled')
 );
-const transactionSource = v.union(v.literal('plaid'), v.literal('gmail_amazon'));
+// 'gmail' = a charge synthesized from an imported email order (any retailer; the store is in
+// normalizedMerchant).
+const transactionSource = v.union(v.literal('plaid'), v.literal('gmail'));
 const transactionKind = v.union(v.literal('expense'), v.literal('income'), v.literal('transfer'));
 const syncSource = v.union(v.literal('plaid'), v.literal('gmail'), v.literal('ai'));
 const syncStatus = v.union(v.literal('running'), v.literal('success'), v.literal('error'));
@@ -199,7 +201,7 @@ export default defineSchema({
 		.index('by_active', ['active'])
 		.index('by_slug', ['slug']),
 
-	// Per-merchant AI category cache for non-Amazon transactions, so each merchant is
+	// Per-merchant AI category cache for plain (non-itemized) transactions, so each merchant is
 	// categorized once and future syncs inherit without another AI call.
 	merchantCategories: defineTable({
 		normalizedMerchant: v.string(),

@@ -6,6 +6,7 @@
 	import SuggestionTransactions from '$lib/SuggestionTransactions.svelte';
 	import Section from '$lib/Section.svelte';
 	import ActionsMenu from '$lib/ActionsMenu.svelte';
+	import Button from '$lib/Button.svelte';
 
 	type CategoryTreatment = 'expected' | 'transfer' | null;
 	type CategoryRow = {
@@ -229,7 +230,7 @@
 				These categories power the month-over-month breakdown. Every category is AI-driven — the
 				description tells the AI how to decide a transaction belongs here (leave it blank when the
 				name says it all). Run <strong>Categorize transactions</strong> to have the AI sort your dynamic
-				Plaid merchants and Amazon items into them.
+				Plaid merchants and order items into them.
 			</p>
 		</div>
 	</section>
@@ -278,22 +279,22 @@
 				<span>Re-run all (ignore cache)</span>
 			</label>
 			<div class="button-row">
-				<button
-					class="button button-outline"
-					type="button"
+				<Button
+					variant="outline"
 					onclick={runSuggest}
-					disabled={isSuggesting}
+					loading={isSuggesting}
+					loadingLabel="Thinking..."
 				>
-					{isSuggesting ? 'Thinking...' : 'Suggest categories'}
-				</button>
-				<button
-					class="button button-primary"
-					type="button"
+					Suggest categories
+				</Button>
+				<Button
+					variant="primary"
 					onclick={runCategorize}
-					disabled={isCategorizing}
+					loading={isCategorizing}
+					loadingLabel="Categorizing..."
 				>
-					{isCategorizing ? 'Categorizing...' : 'Categorize transactions'}
-				</button>
+					Categorize transactions
+				</Button>
 			</div>
 		</div>
 	</section>

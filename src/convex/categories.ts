@@ -7,6 +7,11 @@ import {
 	type MutationCtx
 } from './_generated/server';
 import { loadResolutionData, ruleStatusFor } from './resolution';
+import { RETAILER_ADAPTERS } from './adapters';
+
+// Merchant-name patterns for every store handled by an email adapter. Their charges are categorized
+// per line item (from parsed orders), so they're skipped as merchant-level units.
+const ITEMIZED_MERCHANT_MATCHERS = RETAILER_ADAPTERS.flatMap((adapter) => adapter.merchantMatchers);
 
 const aiProvider = v.union(v.literal('openai'), v.literal('anthropic'));
 
@@ -280,7 +285,7 @@ function isSettledCategory(
 }
 
 // Gather everything the AI needs in one round trip: the taxonomy, the chosen model, and the
-// distinct uncategorized "units" (non-Amazon merchants + item SKUs) still needing a category.
+// distinct uncategorized "units" (plain merchants + order item SKUs) still needing a category.
 export const getCategorizationInput = internalQuery({
 	args: { force: v.optional(v.boolean()) },
 	handler: async (ctx, args) => {
@@ -299,10 +304,10 @@ export const getCategorizationInput = internalQuery({
 
 		const config = (await ctx.db.query('appConfig').take(1))[0];
 
-		// Merchant units: distinct non-Amazon merchants from recent expense charges still needing
-		// the AI. A merchant is settled only if it has a real cached category or a manual pick — an
-		// AI-assigned `uncategorized` is a miss and gets retried every run (that's what Categorize is
-		// for). `force` re-sends everything.
+		// Merchant units: distinct merchants (excluding adapter-itemized stores) from recent expense
+		// charges still needing the AI. A merchant is settled only if it has a real cached category or
+		// a manual pick — an AI-assigned `uncategorized` is a miss and gets retried every run (that's
+		// what Categorize is for). `force` re-sends everything.
 		const txns = await ctx.db.query('transactions').withIndex('by_date').order('desc').take(SCAN_LIMIT);
 		const merchantUnits = new Map<
 			string,
@@ -310,7 +315,8 @@ export const getCategorizationInput = internalQuery({
 		>();
 		for (const row of txns) {
 			if (row.removed || row.kind !== 'expense') continue;
-			if (row.normalizedMerchant.includes('amazon')) continue;
+			if (ITEMIZED_MERCHANT_MATCHERS.some((pattern) => row.normalizedMerchant.includes(pattern)))
+				continue;
 			if (merchantUnits.has(row.normalizedMerchant)) continue;
 			if (!force) {
 				const cached = (

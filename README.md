@@ -142,14 +142,23 @@ Get a key from the [OpenAI dashboard](https://platform.openai.com/api-keys). It'
 works fully without it. To use a different provider, set the equivalent key and adjust the
 classification code in `src/convex/`.
 
+## Environment variables
+
+All integration credentials live **server-side in Convex** and are set with `npx convex env set`
+(add `--prod` to target your production deployment). The connection variables in `.env.local`
+(`CONVEX_DEPLOYMENT`, `PUBLIC_CONVEX_URL`, `PUBLIC_CONVEX_SITE_URL`) are written automatically by
+`npx convex dev` / `npx convex deploy` — you don't set those by hand.
+
+| Variable               | Required | Used for                                                                 |
+| ---------------------- | -------- | ------------------------------------------------------------------------ |
+| `PLAID_CLIENT_ID`      | Yes      | Plaid API client id.                                                     |
+| `PLAID_SECRET`         | Yes      | Plaid API secret for the chosen environment.                            |
+| `PLAID_ENV`            | Yes      | Selects the Plaid API host: `sandbox`, `development`, or `production`.   |
+| `GOOGLE_CLIENT_ID`     | No       | Gmail/Amazon OAuth (shared across deployments).                         |
+| `GOOGLE_CLIENT_SECRET` | No       | Gmail/Amazon OAuth (shared across deployments).                         |
+| `GOOGLE_REDIRECT_URI`  | No       | Gmail OAuth callback — must match the deployment's own `.convex.site`.  |
+| `OPENAI_API_KEY`       | No       | AI-assisted transaction classification.                                 |
+
 ## Building
 
-To create a production version of your app:
-
-```sh
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+> To deploy your app to a live URL instead of localhost, use Vercel or https://www.convex.dev/components/static-hosting

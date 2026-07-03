@@ -9,6 +9,7 @@ import {
 } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
 import { applyMerchantCategory, applyItemCategory } from './categories';
+import { rebindUnmatchedOrders } from './gmail';
 import {
 	categoryDisplayLabel,
 	loadResolutionData,
@@ -197,7 +198,7 @@ async function resolvedLinesInRange(
 }
 
 // Month-over-month dynamic spend, broken into canonical categories. Every charge is resolved into
-// its line items so item categories (not the generic "Amazon" bucket) show up.
+// its line items so item categories (not the generic per-merchant bucket) show up.
 export const getMonthlyDynamicBreakdown = query({
 	args: {
 		startMonth: v.string(),
@@ -334,7 +335,7 @@ export const getRecurringSummary = query({
 });
 
 // Group a classification's resolved lines back under their parent transactions, preserving the
-// per-transaction shape the recurring/expected pages render (with itemized lines as `amazonItems`).
+// per-transaction shape the recurring/expected pages render (with itemized order lines).
 function transactionsForClassification(
 	entries: Array<{ transaction: Doc<'transactions'>; line: ResolvedLineItem }>,
 	classification: Classification
@@ -591,7 +592,7 @@ export const markTransaction = mutation({
 });
 
 // Mark an item (WHAT) of a transaction as expected/recurring: upsert an item rule keyed on
-// `(merchant, sku)`. Only sku-bearing lines (e.g. Amazon items) can have item rules.
+// `(merchant, sku)`. Only sku-bearing lines (e.g. parsed order items) can have item rules.
 export const markLineItem = mutation({
 	args: {
 		merchant: v.string(),
@@ -897,6 +898,10 @@ export const applyTransactionSync = internalMutation({
 			errorCode: undefined,
 			errorMessage: undefined
 		});
+
+		// Newly arrived charges may reconcile an order we'd stood up on its own synthetic charge;
+		// re-bind those so a real Plaid charge always supersedes the synthetic (never double-count).
+		await rebindUnmatchedOrders(ctx);
 	}
 });
 

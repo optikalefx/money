@@ -4,6 +4,7 @@
 	import type { Id } from '../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
 	import ActionsMenu from '$lib/ActionsMenu.svelte';
+	import Button from '$lib/Button.svelte';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic';
 	type MerchantClassification = 'known_recurring' | 'expected';
@@ -168,7 +169,7 @@
 		}
 		return count;
 	});
-	// Month-over-month view (server-computed, canonical categories incl. exploded Amazon items).
+	// Month-over-month view (server-computed, canonical categories incl. exploded order items).
 	const monthlyMonths = $derived(monthlyBreakdown.data?.months ?? []);
 	const selectedMonthBreakdown = $derived(
 		monthlyMonths.find((entry) => entry.month === selectedMonth)
@@ -548,7 +549,7 @@
 			<div class="panel-divider"></div>
 
 			<div>
-				<span class="panel-label">Gmail · Amazon</span>
+				<span class="panel-label">Gmail · Orders</span>
 				{#if gmailStatus.isLoading}
 					<strong>Checking connection...</strong>
 				{:else if gmailStatus.data?.connected}
@@ -576,14 +577,15 @@
 							? 'Reconnect Gmail'
 							: 'Connect Gmail'}
 				</button>
-				<button
-					class="button button-outline"
-					type="button"
+				<Button
+					variant="outline"
 					onclick={syncGmail}
-					disabled={isSyncingGmail || !gmailStatus.data?.connected}
+					loading={isSyncingGmail}
+					loadingLabel="Syncing..."
+					disabled={!gmailStatus.data?.connected}
 				>
-					{isSyncingGmail ? 'Syncing...' : 'Sync Amazon'}
-				</button>
+					Sync orders
+				</Button>
 			</div>
 
 			{#if statusMessage}
