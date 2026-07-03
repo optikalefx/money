@@ -1,23 +1,18 @@
-# Personal Money Tracker
+# Where is my money going?
 
-A personal money tracker that separates expected spending from dynamic (unplanned) expenses. It
-syncs bank transactions from Plaid and Amazon order details from Gmail, classifies them with
-merchant/category rules, and surfaces dynamic spending on a date-filterable dashboard.
-
-Built with SvelteKit + Convex, deployed on Vercel.
+This app's job answers one simple question. Where the heck is my money going? It's great to have a budget, but does that budget match your reality? Even if you think you have everything planned out, how much are you actually spending OUTSIDE of your budget? And on what? This app shows you just that.
 
 ## Running it yourself
 
-Follow these steps in order. Steps 1–3 get the app running locally; steps 4–6 wire up the
-integrations (all optional — the app runs without them, you just won't have any data to classify).
+This app is free, BUT it is NOT hosted anywhere for you to use. I tried to make this so with light techincal knowledge you can use this yourself. Note that this isn't fully "local". It uses Convex as the database, because I love convex. But it's going to be YOUR convex account. The reason it's not fully local is because I want this app to keep itself updated with Convex scheduled functions. Below is what you need to run the app.
 
 ### 1. Prerequisites
 
 - **Node.js 20+** and **npm**.
 - A free **[Convex](https://convex.dev)** account (backend + database).
-- A free **[Plaid](https://plaid.com)** account for bank sync.
-- A free **Google Cloud** account for the Gmail/Amazon integration (optional).
-- An **[OpenAI](https://platform.openai.com)** API key for AI transaction classification (optional). (Or Anthropic)
+- A free **[Plaid](https://dashboard.plaid.com)** account for bank sync.
+- A free **[Google Cloud](https://console.cloud.google.com/)** account for the Gmail/Amazon integration (optional).
+- A free **[OpenAI](https://platform.openai.com)** API key for AI transaction classification (optional).
 
 ### 2. Clone and install
 
@@ -29,26 +24,16 @@ npm install
 
 ### 3. Set up Convex
 
-Convex is the backend/database. The dev command creates (or links) a deployment, pushes the
-functions in `src/convex/`, and writes the connection URLs into `.env.local` for you.
+Convex is the backend & database. Running the command below will setup the backend for you. It will ask you to log into convex and create a project.
 
 ```sh
 npx convex dev
 ```
 
-On first run it will prompt you to log in and create a project. Leave it running in its own
-terminal — it hot-reloads backend functions and keeps the local `.env.local` in sync. It populates:
-
-- `CONVEX_DEPLOYMENT` — the deployment `npx convex dev` targets.
-- `PUBLIC_CONVEX_URL` — the `.convex.cloud` URL the SvelteKit client connects to.
-- `PUBLIC_CONVEX_SITE_URL` — the `.convex.site` URL used for HTTP actions (the Gmail OAuth callback).
-
-In a second terminal, start the SvelteKit dev server:
+### 4. Run the app
 
 ```sh
 npm run dev
-# or open a browser tab automatically:
-npm run dev -- --open
 ```
 
 The app is now running at http://localhost:5173. The integration credentials below are all stored
@@ -65,18 +50,13 @@ Plaid links your bank accounts and imports transactions. The client talks to Pla
 Convex actions, so all Plaid credentials live in Convex env vars.
 
 1. **Create a Plaid account** and grab your keys from the [Plaid Dashboard](https://dashboard.plaid.com)
-   under **Developers → Keys** (`client_id` and the secret for the environment you're using).
-2. **Choose an environment.** `PLAID_ENV` accepts `sandbox`, `development`, or `production`, and
-   defaults to `sandbox`. Sandbox uses Plaid's test credentials (e.g. `user_good` / `pass_good`) and
-   needs no real bank — start there.
-3. **Set the Convex environment variables:**
+   under **Developers → Keys** (`client_id` and `production_secret`
+2. **Set the Convex environment variables:**
 
    ```sh
    npx convex env set PLAID_CLIENT_ID <client-id>
    npx convex env set PLAID_SECRET <secret>
-   npx convex env set PLAID_ENV sandbox
-   # Optional: only needed if you configure an OAuth redirect URI in the Plaid Dashboard
-   npx convex env set PLAID_REDIRECT_URI http://localhost:5173
+   npx convex env set PLAID_ENV production
    ```
 
    Repeat with `--prod` to configure your production Convex deployment.
@@ -118,14 +98,7 @@ HTTP action at `${PUBLIC_CONVEX_SITE_URL}/gmail/callback` (note the `.convex.sit
    npx convex env set --prod GOOGLE_REDIRECT_URI https://<prod-deployment>.convex.site/gmail/callback
    ```
 
-   Optional overrides:
-   - `GMAIL_AMAZON_QUERY` — Gmail search used to find Amazon order emails. Defaults to
-     `from:(auto-confirm@amazon.com OR order-update@amazon.com) subject:(order OR ordered) newer_than:1y`.
-   - `GMAIL_POST_AUTH_URL` — fallback app URL to return to after consent. Normally unnecessary: the
-     app passes its current origin through the OAuth `state`, so the callback redirects back to
-     wherever you started.
-
-7. In the app, click **Connect Gmail**, approve consent, then **Sync Amazon**.
+7. In the app, click **Connect Gmail**, approve consent, then **Sync Orders**.
 
 ### 6. OpenAI (AI classification)
 
@@ -139,15 +112,11 @@ npx convex env set OPENAI_API_KEY <openai-api-key>
 ```
 
 Get a key from the [OpenAI dashboard](https://platform.openai.com/api-keys). It's optional — the app
-works fully without it. To use a different provider, set the equivalent key and adjust the
-classification code in `src/convex/`.
+works fully without it. I only did OpenAI, if you want Anthropic or another, PRs are welcome :)
 
 ## Environment variables
 
-All integration credentials live **server-side in Convex** and are set with `npx convex env set`
-(add `--prod` to target your production deployment). The connection variables in `.env.local`
-(`CONVEX_DEPLOYMENT`, `PUBLIC_CONVEX_URL`, `PUBLIC_CONVEX_SITE_URL`) are written automatically by
-`npx convex dev` / `npx convex deploy` — you don't set those by hand.
+Here is the full list of env vars you need.
 
 | Variable               | Required | Used for                                                                 |
 | ---------------------- | -------- | ------------------------------------------------------------------------ |
