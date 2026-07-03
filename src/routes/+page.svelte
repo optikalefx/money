@@ -3,7 +3,7 @@
 	import { api } from '../convex/_generated/api.js';
 	import type { Id } from '../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
-	import ActionsMenu from '$lib/ActionsMenu.svelte';
+	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
 	import Button from '$lib/Button.svelte';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic';
@@ -825,27 +825,16 @@
 								<td class="amount-column" data-label="Amount">{formatAmount(line.amount)}</td>
 								<td data-label="Actions">
 									<div class="mark-actions">
-										{#if itemPrimary}
-											<button
-												type="button"
-												title="Treat this item as recurring"
-												disabled={busy}
-												onclick={() => markItem(row, 'known_recurring')}
-											>
-												Recurring item
-											</button>
-										{:else}
-											<button
-												type="button"
-												title="Treat this merchant as recurring"
-												disabled={busy}
-												onclick={() => markMerchant(row, 'known_recurring')}
-											>
-												Recurring merchant
-											</button>
-										{/if}
-										<ActionsMenu
+										<ButtonWithActions
+											variant="soft"
 											disabled={busy}
+											title={itemPrimary
+												? 'Treat this item as recurring'
+												: 'Treat this merchant as recurring'}
+											onclick={() =>
+												itemPrimary
+													? markItem(row, 'known_recurring')
+													: markMerchant(row, 'known_recurring')}
 											items={[
 												...(itemPrimary
 													? [{ label: 'Expected item', onSelect: () => markItem(row, 'expected') }]
@@ -877,7 +866,9 @@
 														]
 													: [])
 											]}
-										/>
+										>
+											{itemPrimary ? 'Recurring item' : 'Recurring merchant'}
+										</ButtonWithActions>
 									</div>
 								</td>
 							</tr>
@@ -1011,8 +1002,7 @@
 		font-size: 0.9rem;
 	}
 
-	.button:disabled,
-	.mark-actions button:disabled {
+	.button:disabled {
 		cursor: not-allowed;
 		opacity: 0.58;
 		transform: none;
@@ -1495,31 +1485,8 @@
 	}
 
 	.mark-actions {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 0.35rem;
-	}
-
-	.mark-actions button {
-		min-height: 2.1rem;
-		min-width: 0;
-		padding: 0.45rem 0.4rem;
-		color: var(--color-accent-foreground);
-		background: rgb(230 220 205 / 50%);
-		border: 1px solid rgb(222 216 207 / 80%);
-		border-radius: var(--radius-pill);
-		font-size: 0.68rem;
-		font-weight: 900;
-		line-height: 1.05;
-		cursor: pointer;
-		transition:
-			transform 220ms ease,
-			background-color 220ms ease;
-	}
-
-	.mark-actions button:hover {
-		transform: translateY(-0.08rem);
-		background: rgb(230 220 205 / 78%);
+		display: flex;
+		justify-content: flex-end;
 	}
 
 	.empty-state {
@@ -1595,10 +1562,6 @@
 			letter-spacing: 0.08em;
 			text-transform: uppercase;
 			content: attr(data-label);
-		}
-
-		.mark-actions {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 	}
 </style>

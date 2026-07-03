@@ -5,7 +5,7 @@
 	import type { Id } from '../../convex/_generated/dataModel.js';
 	import SuggestionTransactions from '$lib/SuggestionTransactions.svelte';
 	import Section from '$lib/Section.svelte';
-	import ActionsMenu from '$lib/ActionsMenu.svelte';
+	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
 	import Button from '$lib/Button.svelte';
 
 	type CategoryTreatment = 'expected' | 'transfer' | null;
@@ -425,16 +425,11 @@
 								</td>
 								<td class="actions-cell">
 									<div class="cell-actions">
-									<button
-										type="button"
-										class="button button-outline"
-										disabled={!isDirty(row) || savingId === row.id}
-										onclick={() => saveRow(row)}
-									>
-										{savingId === row.id ? 'Saving...' : 'Save'}
-									</button>
 									{#if row.slug !== 'uncategorized'}
-										<ActionsMenu
+										<ButtonWithActions
+											variant="outline"
+											disabled={!isDirty(row) || savingId === row.id}
+											onclick={() => saveRow(row)}
 											items={[
 												{
 													label:
@@ -446,7 +441,18 @@
 												},
 												{ label: 'Delete', destructive: true, onSelect: () => removeCategory(row) }
 											]}
-										/>
+										>
+											{savingId === row.id ? 'Saving...' : 'Save'}
+										</ButtonWithActions>
+									{:else}
+										<button
+											type="button"
+											class="button button-outline"
+											disabled={!isDirty(row) || savingId === row.id}
+											onclick={() => saveRow(row)}
+										>
+											{savingId === row.id ? 'Saving...' : 'Save'}
+										</button>
 									{/if}
 									</div>
 								</td>
@@ -750,13 +756,6 @@
 		gap: 0.5rem;
 		align-items: center;
 		justify-content: flex-end;
-	}
-
-	.cell-actions :global(.actions-trigger) {
-		width: auto;
-		min-height: 2.3rem;
-		padding: 0.45rem 0.9rem;
-		font-size: 0.78rem;
 	}
 
 	.text-action {
