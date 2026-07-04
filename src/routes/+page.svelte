@@ -975,6 +975,10 @@
 		border-radius: 2rem 3.5rem 2rem 2.75rem;
 	}
 
+	.connection-panel {
+		container-type: inline-size;
+	}
+
 	.connection-panel strong {
 		display: block;
 		font-family: var(--font-heading);
@@ -984,9 +988,16 @@
 
 	.button-row {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.75rem;
+		gap: clamp(0.4rem, 2cqi, 0.75rem);
 		margin-top: 1.5rem;
+	}
+
+	.button-row :global(.button) {
+		min-width: 0;
+		min-height: clamp(2.25rem, 9cqi, 3rem);
+		padding: 0.75rem clamp(0.8rem, 4cqi, 2rem);
+		font-size: clamp(0.78rem, 3.2cqi, 1rem);
+		white-space: nowrap;
 	}
 
 	.panel-divider {
@@ -1504,6 +1515,7 @@
 
 		.hero {
 			min-height: auto;
+			margin-bottom: clamp(1.5rem, 5vw, 2.5rem);
 		}
 
 		.section-heading {
