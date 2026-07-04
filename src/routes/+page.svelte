@@ -114,7 +114,9 @@
 	// Categories the user can pick from the review-queue dropdown (the Uncategorized fallback is
 	// never a target — picking it would be a no-op).
 	const selectableCategories = $derived(
-		(categoriesQuery.data ?? []).filter((category) => category.slug !== 'uncategorized')
+		(categoriesQuery.data ?? [])
+			.filter((category) => category.slug !== 'uncategorized')
+			.toSorted((a, b) => a.name.localeCompare(b.name))
 	);
 	const allTransactions = $derived((transactions.data ?? []) as TransactionRow[]);
 
