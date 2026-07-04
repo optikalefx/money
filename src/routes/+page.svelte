@@ -104,11 +104,11 @@
 	const windowEnd = $derived(maxMonth(initialMonth, selectedMonth));
 
 	const plaidStatus = useQuery(api.plaid.getConnectionStatus, () => ({}));
-	const transactions = useQuery(api.plaid.listRecentTransactions, () => transactionArgs, {
+	const transactions = useQuery(api.transactions.listRecentTransactions, () => transactionArgs, {
 		keepPreviousData: true
 	});
 	const monthlyBreakdown = useQuery(
-		api.plaid.getMonthlyDynamicBreakdown,
+		api.transactions.getMonthlyDynamicBreakdown,
 		() => ({ startMonth: windowStart, endMonth: windowEnd }),
 		{ keepPreviousData: true }
 	);
@@ -119,10 +119,10 @@
 	const syncAllItems = useAction(api.plaidActions.syncAllItems);
 	const getGmailAuthUrl = useAction(api.gmailActions.getGmailAuthUrl);
 	const syncGmailAction = useAction(api.gmailActions.syncGmail);
-	const markTransactionMutation = useMutation(api.plaid.markTransaction);
-	const markLineItemMutation = useMutation(api.plaid.markLineItem);
-	const markCategoryExpectedMutation = useMutation(api.plaid.markCategoryExpected);
-	const setLineItemCategoryMutation = useMutation(api.plaid.setLineItemCategory);
+	const markTransactionMutation = useMutation(api.transactions.markTransaction);
+	const markLineItemMutation = useMutation(api.transactions.markLineItem);
+	const markCategoryExpectedMutation = useMutation(api.transactions.markCategoryExpected);
+	const setLineItemCategoryMutation = useMutation(api.transactions.setLineItemCategory);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',

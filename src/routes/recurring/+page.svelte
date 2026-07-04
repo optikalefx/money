@@ -50,15 +50,15 @@
 	const tableArgs = $derived(allTime ? {} : { startDate: monthStart, endDate: monthEnd });
 
 	// Summary (category + merchant totals) is always all-time — it is not affected by the date filter.
-	const summary = useQuery(api.plaid.getRecurringSummary, () => ({}));
+	const summary = useQuery(api.transactions.getRecurringSummary, () => ({}));
 	// Only the transaction table below responds to the date filter.
-	const table = useQuery(api.plaid.getRecurringTransactions, () => tableArgs, {
+	const table = useQuery(api.transactions.getRecurringTransactions, () => tableArgs, {
 		keepPreviousData: true
 	});
 	const categoriesQuery = useQuery(api.categories.listCategories, () => ({}));
-	const unmarkRecurringMutation = useMutation(api.plaid.unmarkRecurring);
-	const unmarkLineItemMutation = useMutation(api.plaid.unmarkLineItem);
-	const setLineItemCategoryMutation = useMutation(api.plaid.setLineItemCategory);
+	const unmarkRecurringMutation = useMutation(api.transactions.unmarkRecurring);
+	const unmarkLineItemMutation = useMutation(api.transactions.unmarkLineItem);
+	const setLineItemCategoryMutation = useMutation(api.transactions.setLineItemCategory);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',

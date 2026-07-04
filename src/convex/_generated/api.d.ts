@@ -21,6 +21,7 @@ import type * as plaid from "../plaid.js";
 import type * as plaidActions from "../plaidActions.js";
 import type * as reset from "../reset.js";
 import type * as resolution from "../resolution.js";
+import type * as transactions from "../transactions.js";
 
 import type {
   ApiFromModules,
@@ -42,6 +43,7 @@ declare const fullApi: ApiFromModules<{
   plaidActions: typeof plaidActions;
   reset: typeof reset;
   resolution: typeof resolution;
+  transactions: typeof transactions;
 }>;
 
 /**

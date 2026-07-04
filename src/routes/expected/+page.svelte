@@ -58,17 +58,17 @@
 	const tableArgs = $derived(allTime ? {} : { startDate: monthStart, endDate: monthEnd });
 
 	// Summary (merchant + category rules) is always all-time — it is not affected by the date filter.
-	const summary = useQuery(api.plaid.getExpectedSummary, () => ({}));
+	const summary = useQuery(api.transactions.getExpectedSummary, () => ({}));
 	// Only the transaction table below responds to the date filter.
-	const table = useQuery(api.plaid.getExpectedTransactions, () => tableArgs, {
+	const table = useQuery(api.transactions.getExpectedTransactions, () => tableArgs, {
 		keepPreviousData: true
 	});
 	const categoriesQuery = useQuery(api.categories.listCategories, () => ({}));
-	const unmarkMerchantMutation = useMutation(api.plaid.unmarkExpectedMerchant);
-	const unmarkLineItemMutation = useMutation(api.plaid.unmarkLineItem);
-	const unmarkTransferMutation = useMutation(api.plaid.unmarkTransferMerchant);
+	const unmarkMerchantMutation = useMutation(api.transactions.unmarkExpectedMerchant);
+	const unmarkLineItemMutation = useMutation(api.transactions.unmarkLineItem);
+	const unmarkTransferMutation = useMutation(api.transactions.unmarkTransferMerchant);
 	const setCategoryTreatmentMutation = useMutation(api.categories.setCategoryTreatment);
-	const setLineItemCategoryMutation = useMutation(api.plaid.setLineItemCategory);
+	const setLineItemCategoryMutation = useMutation(api.transactions.setLineItemCategory);
 
 	const currency = new Intl.NumberFormat('en-US', {
 		style: 'currency',
