@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { useAction, useMutation, useQuery } from 'convex-svelte';
 	import { api } from '../../convex/_generated/api.js';
+	import { AI_MODELS, defaultModelFor, isAllowedModel } from '../../convex/aiModels';
 	import type { Id } from '../../convex/_generated/dataModel.js';
 	import SuggestionTransactions from '$lib/SuggestionTransactions.svelte';
 	import Section from '$lib/Section.svelte';
@@ -61,7 +62,13 @@
 	let savingConfig = $state(false);
 
 	const provider = $derived(providerOverride ?? aiConfig.data?.aiProvider ?? 'openai');
-	const model = $derived(modelOverride ?? aiConfig.data?.aiModel ?? '');
+	const modelOptions = $derived(AI_MODELS[provider]);
+	// Snap to the provider's default when the saved model belongs to the other provider
+	// (or predates the curated list).
+	const savedModel = $derived(aiConfig.data?.aiModel ?? '');
+	const model = $derived(
+		modelOverride ?? (isAllowedModel(provider, savedModel) ? savedModel : defaultModelFor(provider))
+	);
 	const rows = $derived(
 		[...((categories.data ?? []) as CategoryRow[])].sort((a, b) => a.name.localeCompare(b.name))
 	);
@@ -248,8 +255,10 @@
 				<span>AI provider</span>
 				<select
 					value={provider}
-					onchange={(event) =>
-						(providerOverride = event.currentTarget.value as 'openai' | 'anthropic')}
+					onchange={(event) => {
+						providerOverride = event.currentTarget.value as 'openai' | 'anthropic';
+						modelOverride = null;
+					}}
 				>
 					<option value="openai">OpenAI</option>
 					<option value="anthropic">Anthropic</option>
@@ -257,12 +266,11 @@
 			</label>
 			<label>
 				<span>Model</span>
-				<input
-					type="text"
-					value={model}
-					oninput={(event) => (modelOverride = event.currentTarget.value)}
-					placeholder="gpt-4o-mini"
-				/>
+				<select value={model} onchange={(event) => (modelOverride = event.currentTarget.value)}>
+					{#each modelOptions as option (option.id)}
+						<option value={option.id}>{option.label}</option>
+					{/each}
+				</select>
 			</label>
 			<button
 				class="button button-outline"

@@ -6,6 +6,7 @@ import {
 	query,
 	type MutationCtx
 } from './_generated/server';
+import { AI_MODELS, isAllowedModel } from './aiModels';
 import { loadResolutionData, ruleStatusFor } from './resolution';
 import { RETAILER_ADAPTERS } from './adapters';
 
@@ -194,6 +195,10 @@ export const setAiConfig = mutation({
 		const now = Date.now();
 		const model = args.aiModel.trim();
 		if (!model) throw new Error('A model id is required.');
+		if (!isAllowedModel(args.aiProvider, model)) {
+			const allowed = AI_MODELS[args.aiProvider].map((m) => m.id).join(', ');
+			throw new Error(`Unknown ${args.aiProvider} model "${model}". Choose one of: ${allowed}.`);
+		}
 		const existing = (await ctx.db.query('appConfig').take(1))[0];
 		if (existing) {
 			await ctx.db.patch(existing._id, {

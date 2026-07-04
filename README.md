@@ -12,7 +12,7 @@ This app is free, BUT it is NOT hosted anywhere for you to use. I tried to make 
 - A free **[Convex](https://convex.dev)** account (backend + database).
 - A free **[Plaid](https://dashboard.plaid.com)** account for bank sync.
 - A free **[Google Cloud](https://console.cloud.google.com/)** account for the Gmail/Amazon integration (optional).
-- A free **[OpenAI](https://platform.openai.com)** API key for AI transaction classification (optional).
+- A free **[OpenAI](https://platform.openai.com)** or **[Anthropic](https://console.anthropic.com)** API key for AI transaction classification (optional).
 
 ### 2. Clone and install
 
@@ -100,19 +100,24 @@ HTTP action at `${PUBLIC_CONVEX_SITE_URL}/gmail/callback` (note the `.convex.sit
 
 7. In the app, click **Connect Gmail**, approve consent, then **Sync Orders**.
 
-### 6. OpenAI (AI classification)
+### 6. AI classification (OpenAI or Anthropic)
 
 Transactions are classified with merchant/category rules; anything the rules don't match stays
-`unreviewed` for you to classify by hand. The backend also reserves an `OPENAI_API_KEY` env var and
-an `ai` classification source for LLM-assisted classification. If/when you wire up an AI provider,
-set the key in Convex:
+`unreviewed` for you to classify by hand. For LLM-assisted classification, the app supports both
+**OpenAI** and **Anthropic** — set the key for whichever provider you want to use:
 
 ```sh
+# OpenAI
 npx convex env set OPENAI_API_KEY <openai-api-key>
+
+# Anthropic
+npx convex env set ANTHROPIC_API_KEY <anthropic-api-key>
 ```
 
-Get a key from the [OpenAI dashboard](https://platform.openai.com/api-keys). It's optional — the app
-works fully without it. I only did OpenAI, if you want Anthropic or another, PRs are welcome :)
+Get a key from the [OpenAI dashboard](https://platform.openai.com/api-keys) or the
+[Anthropic Console](https://console.anthropic.com/settings/keys). Then pick the provider and model
+on the **Categories** page in the app (e.g. `gpt-4o-mini` for OpenAI, or `claude-haiku-4-5` for
+Anthropic). It's optional — the app works fully without it.
 
 ## Environment variables
 
@@ -126,7 +131,8 @@ Here is the full list of env vars you need.
 | `GOOGLE_CLIENT_ID`     | No       | Gmail/Amazon OAuth (shared across deployments).                         |
 | `GOOGLE_CLIENT_SECRET` | No       | Gmail/Amazon OAuth (shared across deployments).                         |
 | `GOOGLE_REDIRECT_URI`  | No       | Gmail OAuth callback — must match the deployment's own `.convex.site`.  |
-| `OPENAI_API_KEY`       | No       | AI-assisted transaction classification.                                 |
+| `OPENAI_API_KEY`       | No       | AI-assisted transaction classification (OpenAI provider).               |
+| `ANTHROPIC_API_KEY`    | No       | AI-assisted transaction classification (Anthropic provider).            |
 
 ## Building
 
