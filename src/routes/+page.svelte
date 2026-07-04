@@ -5,6 +5,7 @@
 	import { tooltip, truncateWords } from '$lib/tooltip';
 	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
 	import Button from '$lib/Button.svelte';
+	import DateChip from '$lib/DateChip.svelte';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic';
 	type MerchantClassification = 'known_recurring' | 'expected';
@@ -829,7 +830,9 @@
 							{@const isCategorized = line.categorySlug !== 'uncategorized'}
 							{@const itemPrimary = Boolean(line.orderSource && line.sku)}
 							<tr>
-								<td data-label="Date">{row.date}</td>
+								<td data-label="Date">
+									<DateChip date={row.date} />
+								</td>
 								<td data-label="Merchant">
 									<strong use:tooltip={short === line.title ? undefined : line.title}
 										>{short}{#if line.quantity && line.quantity > 1}
@@ -1456,7 +1459,7 @@
 	}
 
 	.date-col {
-		width: 7rem;
+		width: 6rem;
 	}
 
 	.merchant-col {
