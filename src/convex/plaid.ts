@@ -104,16 +104,36 @@ export const listRecentTransactions = query({
 	args: transactionFiltersValidator,
 	handler: async (ctx, args) => {
 		const limit = Math.min(args.limit ?? 50, 100);
+		const term = args.search?.trim().toLowerCase();
+		// With a search active, scan the whole selected month (not just the first `limit` rows) so
+		// matches aren't hidden by the row cap. Matching runs below over both charge-level and
+		// resolved line-item fields (title + canonical category), then we trim back to `limit`.
+		const scanLimit = term ? 1000 : limit;
 		const rows = await readTransactions(ctx, {
-			limit,
+			limit: scanLimit,
 			startDate: args.startDate,
-			endDate: args.endDate,
-			search: args.search
+			endDate: args.endDate
 		});
 		const data = await loadResolutionData(ctx);
+		const resolved = rows.map((transaction) => ({
+			transaction,
+			lineItems: resolveTransactionLineItems(transaction, data)
+		}));
+		const matched = term
+			? resolved.filter(({ transaction, lineItems }) =>
+					[
+						transaction.name,
+						transaction.merchantName,
+						transaction.normalizedMerchant,
+						transaction.notes,
+						...lineItems.flatMap((item) => [item.title, item.category])
+					]
+						.filter(Boolean)
+						.some((value) => value!.toLowerCase().includes(term))
+				)
+			: resolved;
 		return Promise.all(
-			rows.map(async (transaction) => {
-				const lineItems = resolveTransactionLineItems(transaction, data);
+			matched.slice(0, limit).map(async ({ transaction, lineItems }) => {
 				return {
 					id: transaction._id,
 					date: transaction.date,
@@ -214,6 +234,8 @@ export const getMonthlyDynamicBreakdown = query({
 		const byMonth = new Map<string, Map<string, number>>();
 		const totalsByCategory = new Map<string, number>();
 		const monthTotals = new Map<string, number>();
+		// month -> merchant label -> { total, count } (count is the number of contributing line rows)
+		const merchantsByMonth = new Map<string, Map<string, { total: number; count: number }>>();
 
 		const add = (month: string, slug: string, amount: number) => {
 			if (amount <= 0) return;
@@ -224,9 +246,21 @@ export const getMonthlyDynamicBreakdown = query({
 			monthTotals.set(month, (monthTotals.get(month) ?? 0) + amount);
 		};
 
+		const addMerchant = (month: string, label: string, amount: number) => {
+			if (amount <= 0) return;
+			const monthMap = merchantsByMonth.get(month) ?? new Map<string, { total: number; count: number }>();
+			const existing = monthMap.get(label) ?? { total: 0, count: 0 };
+			existing.total += amount;
+			existing.count += 1;
+			monthMap.set(label, existing);
+			merchantsByMonth.set(month, monthMap);
+		};
+
 		for (const { transaction, line } of entries) {
 			if (line.classification !== 'dynamic' || line.kind !== 'expense') continue;
-			add(transaction.date.slice(0, 7), line.categorySlug, line.allocatedAmount);
+			const month = transaction.date.slice(0, 7);
+			add(month, line.categorySlug, line.allocatedAmount);
+			addMerchant(month, transaction.merchantName ?? transaction.name, line.allocatedAmount);
 		}
 
 		const months = enumerateMonths(args.startMonth, args.endMonth).map((month) => {
@@ -234,7 +268,11 @@ export const getMonthlyDynamicBreakdown = query({
 			const byCategory = [...monthMap.entries()]
 				.map(([slug, total]) => ({ slug, name: nameFor(slug), total }))
 				.sort((a, b) => b.total - a.total);
-			return { month, total: monthTotals.get(month) ?? 0, byCategory };
+			const merchantMap = merchantsByMonth.get(month) ?? new Map<string, { total: number; count: number }>();
+			const byMerchant = [...merchantMap.entries()]
+				.map(([label, { total, count }]) => ({ label, total, count }))
+				.sort((a, b) => b.total - a.total);
+			return { month, total: monthTotals.get(month) ?? 0, byCategory, byMerchant };
 		});
 
 		return {
@@ -971,10 +1009,8 @@ async function readTransactions(
 		limit: number;
 		startDate?: string;
 		endDate?: string;
-		search?: string;
 	}
 ) {
-	const takeLimit = args.search ? Math.min(args.limit * 4, 200) : args.limit;
 	const rows = await ctx.db
 		.query('transactions')
 		.withIndex('by_date', (q) => {
@@ -986,26 +1022,9 @@ async function readTransactions(
 			return q;
 		})
 		.order('desc')
-		.take(takeLimit);
+		.take(args.limit);
 
-	const activeRows = rows.filter((transaction) => !transaction.removed);
-	const term = args.search?.trim().toLowerCase();
-	if (!term) return activeRows.slice(0, args.limit);
-
-	return activeRows
-		.filter((transaction) =>
-			[
-				transaction.name,
-				transaction.merchantName,
-				transaction.normalizedMerchant,
-				transaction.categoryPrimary,
-				transaction.categoryDetailed,
-				transaction.notes
-			]
-				.filter(Boolean)
-				.some((value) => value!.toLowerCase().includes(term))
-		)
-		.slice(0, args.limit);
+	return rows.filter((transaction) => !transaction.removed);
 }
 
 function lastDayOfMonth(month: string) {

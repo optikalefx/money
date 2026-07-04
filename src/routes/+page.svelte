@@ -55,6 +55,9 @@
 	const initialMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
 
 	let selectedMonth = $state(initialMonth);
+	// `searchInput` is the live text field; `searchTerm` is the debounced value that drives the
+	// (server-side) query and the filter chip, so typing doesn't fire a query per keystroke.
+	let searchInput = $state('');
 	let searchTerm = $state('');
 	let amountSort = $state<'asc' | 'desc' | null>(null);
 	let isConnecting = $state(false);
@@ -67,6 +70,14 @@
 	let statusMessage = $state('');
 	let errorMessage = $state('');
 
+	// Debounce free-typed search into `searchTerm` so a query only fires ~300ms after the user stops.
+	// Chip clicks bypass this by setting `searchTerm` directly (see filterBySearch).
+	$effect(() => {
+		const next = searchInput.trim();
+		const id = setTimeout(() => (searchTerm = next), 300);
+		return () => clearTimeout(id);
+	});
+
 	function rowKey(row: { txnId: string; line: { sku: string | null } }) {
 		return `${row.txnId}:${row.line.sku ?? ''}`;
 	}
@@ -78,7 +89,14 @@
 	// most-recent rows are all from later months. Classification isn't narrowed server-side: the
 	// queue intentionally shows both `dynamic` and `unreviewed` rows (see effectiveClassification),
 	// and the index filter only matches a single classification value.
-	const transactionArgs = $derived({ limit: 100, startDate: monthStart, endDate: monthEnd });
+	// Search is applied server-side (across charge + resolved line-item fields) so results aren't
+	// limited to the ≤100 rows the browser happens to have loaded — see listRecentTransactions.
+	const transactionArgs = $derived({
+		limit: 100,
+		startDate: monthStart,
+		endDate: monthEnd,
+		search: searchTerm.trim() || undefined
+	});
 
 	// A rolling 12-month window that always includes the selected month, for the
 	// month-over-month breakdown (server-side, so it isn't limited to the recent-rows cap).
@@ -121,22 +139,14 @@
 	const allTransactions = $derived((transactions.data ?? []) as TransactionRow[]);
 
 	// The review queue is a flat list of dynamic-expense line items (the WHAT) within the month.
+	// Text search is applied server-side (transactionArgs.search), so no term filtering here.
 	const dynamicLineRows = $derived.by(() => {
-		const term = searchTerm.trim().toLowerCase();
 		const rows: LineRow[] = [];
 		for (const transaction of allTransactions) {
 			if (transaction.removed) continue;
 			if (transaction.date < monthStart || transaction.date > monthEnd) continue;
 			for (const line of transaction.lineItems) {
 				if (line.classification !== 'dynamic' || line.kind !== 'expense') continue;
-				if (
-					term &&
-					![transaction.name, transaction.merchantName, line.title, line.category]
-						.filter(Boolean)
-						.some((value) => value!.toLowerCase().includes(term))
-				) {
-					continue;
-				}
 				rows.push({
 					txnId: transaction.id,
 					date: transaction.date,
@@ -157,9 +167,6 @@
 		const dir = amountSort === 'asc' ? 1 : -1;
 		return [...dynamicLineRows].sort((a, b) => (a.line.amount - b.line.amount) * dir);
 	});
-	const dynamicByMerchant = $derived(
-		summarizeBy(dynamicLineRows, (row) => row.merchantName ?? row.name)
-	);
 	const recurringCount = $derived.by(() => {
 		let count = 0;
 		for (const transaction of allTransactions) {
@@ -178,6 +185,9 @@
 	);
 	const dynamicTotalMonthly = $derived(selectedMonthBreakdown?.total ?? 0);
 	const canonicalCategoryRows = $derived(selectedMonthBreakdown?.byCategory ?? []);
+	// Top merchants is server-computed (like the category breakdown) so it reflects the whole month,
+	// not just the ≤100 rows loaded for the review table below.
+	const dynamicByMerchant = $derived((selectedMonthBreakdown?.byMerchant ?? []).slice(0, 8));
 	const maxMonthTotal = $derived(
 		monthlyMonths.reduce((max, entry) => Math.max(max, entry.total), 0)
 	);
@@ -221,7 +231,10 @@
 	}
 
 	function filterBySearch(label: string) {
-		searchTerm = searchTerm === label ? '' : label;
+		const next = searchTerm === label ? '' : label;
+		// Keep the text field in sync and commit immediately — a chip click isn't a rapid keystroke.
+		searchInput = next;
+		searchTerm = next;
 	}
 
 	// Cycle the Amount column sort: none → ascending → descending → none.
@@ -242,7 +255,14 @@
 		}
 		const term = searchTerm.trim();
 		if (term) {
-			filters.push({ key: 'search', label: term, clear: () => (searchTerm = '') });
+			filters.push({
+				key: 'search',
+				label: term,
+				clear: () => {
+					searchInput = '';
+					searchTerm = '';
+				}
+			});
 		}
 		return filters;
 	});
@@ -475,21 +495,6 @@
 		}
 	}
 
-	function summarizeBy(rows: LineRow[], keyFor: (row: LineRow) => string) {
-		const totals: Record<string, { label: string; total: number; count: number }> = {};
-
-		for (const row of rows) {
-			const label = keyFor(row);
-			const existing = totals[label] ?? { label, total: 0, count: 0 };
-			existing.total += row.line.amount;
-			existing.count += 1;
-			totals[label] = existing;
-		}
-
-		return Object.values(totals)
-			.sort((a, b) => b.total - a.total)
-			.slice(0, 8);
-	}
 </script>
 
 <svelte:head>
@@ -599,17 +604,6 @@
 		</div>
 	</section>
 
-	<section class="control-bar organic-surface" aria-label="Transaction filters">
-		<label>
-			<span>Month</span>
-			<input type="month" bind:value={selectedMonth} />
-		</label>
-		<label class="search-field">
-			<span>Search</span>
-			<input type="search" bind:value={searchTerm} placeholder="Merchant, category, notes" />
-		</label>
-	</section>
-
 	<section class="trend-section organic-surface" aria-label="Dynamic spending month over month">
 		<div class="section-heading compact">
 			<div>
@@ -669,7 +663,7 @@
 		<div class="insight-panel organic-surface">
 			<div class="section-heading compact">
 				<div>
-					<p class="eyebrow">Dynamic · {formatMonthShort(selectedMonth)}</p>
+					<p class="eyebrow">{formatMonthLong(selectedMonth)}</p>
 					<h2>By category</h2>
 				</div>
 			</div>
@@ -697,7 +691,7 @@
 		<div class="insight-panel organic-surface">
 			<div class="section-heading compact">
 				<div>
-					<p class="eyebrow">Dynamic</p>
+					<p class="eyebrow">{formatMonthLong(selectedMonth)}</p>
 					<h2>Top merchants</h2>
 				</div>
 			</div>
@@ -751,6 +745,21 @@
 				<span class="sync-chip">Last sync {formatDate(plaidStatus.data.items[0].lastSyncAt)}</span>
 			{/if}
 		</div>
+
+		<section class="control-bar organic-surface" aria-label="Transaction filters">
+			<label>
+				<span>Month</span>
+				<input type="month" bind:value={selectedMonth} />
+			</label>
+			<label>
+				<span>Search</span>
+				<input
+					type="search"
+					bind:value={searchInput}
+					placeholder="Merchant, category, item, notes"
+				/>
+			</label>
+		</section>
 
 		<div class="table-shell organic-surface">
 			{#if transactions.isLoading}
