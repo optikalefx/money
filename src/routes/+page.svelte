@@ -53,6 +53,9 @@
 
 	const today = new Date();
 	const initialMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+	// Max transactions fetched for one month. The review table pages over these client-side. Must
+	// match `MONTH_ROW_CAP` in src/convex/transactions.ts; hitting it means the month was truncated.
+	const MONTH_ROW_CAP = 500;
 
 	let selectedMonth = $state(initialMonth);
 	// `searchInput` is the live text field; `searchTerm` is the debounced value that drives the
@@ -92,7 +95,7 @@
 	// Search is applied server-side (across charge + resolved line-item fields) so results aren't
 	// limited to the ≤100 rows the browser happens to have loaded — see listRecentTransactions.
 	const transactionArgs = $derived({
-		limit: 100,
+		limit: MONTH_ROW_CAP,
 		startDate: monthStart,
 		endDate: monthEnd,
 		search: searchTerm.trim() || undefined
@@ -167,6 +170,26 @@
 		const dir = amountSort === 'asc' ? 1 : -1;
 		return [...dynamicLineRows].sort((a, b) => (a.line.amount - b.line.amount) * dir);
 	});
+	// Client-side paging of the review table. The month's rows are already loaded (≤100), so slicing
+	// locally is instant; numbered circles below the table switch pages.
+	const pageSize = 50;
+	let currentPage = $state(1);
+	const totalPages = $derived(Math.max(1, Math.ceil(sortedLineRows.length / pageSize)));
+	// Guard against a stale page after filters shrink the list (e.g. a search narrows to 1 page).
+	const safePage = $derived(Math.min(currentPage, totalPages));
+	const pagedLineRows = $derived(
+		sortedLineRows.slice((safePage - 1) * pageSize, safePage * pageSize)
+	);
+	// Jump back to the first page whenever the query inputs change.
+	$effect(() => {
+		void selectedMonth;
+		void searchTerm;
+		void amountSort;
+		currentPage = 1;
+	});
+	// The month exceeded the fetch ceiling, so the table (and pager) only cover the most-recent
+	// MONTH_ROW_CAP transactions. Surfaced below the table so truncation is never silent.
+	const monthTruncated = $derived(allTransactions.length >= MONTH_ROW_CAP);
 	const recurringCount = $derived.by(() => {
 		let count = 0;
 		for (const transaction of allTransactions) {
@@ -494,7 +517,6 @@
 			markingRowKey = null;
 		}
 	}
-
 </script>
 
 <svelte:head>
@@ -799,7 +821,7 @@
 						</tr>
 					</thead>
 					<tbody>
-						{#each sortedLineRows as row (rowKey(row))}
+						{#each pagedLineRows as row (rowKey(row))}
 							{@const line = row.line}
 							{@const key = rowKey(row)}
 							{@const busy = markingRowKey === key}
@@ -864,7 +886,10 @@
 																			label: 'Recurring item',
 																			onSelect: () => markItem(row, 'known_recurring')
 																		},
-																		{ label: 'Expected item', onSelect: () => markItem(row, 'expected') }
+																		{
+																			label: 'Expected item',
+																			onSelect: () => markItem(row, 'expected')
+																		}
 																	]
 																: [])
 														]),
@@ -886,6 +911,28 @@
 						{/each}
 					</tbody>
 				</table>
+				{#if monthTruncated}
+					<p class="table-note">
+						Showing the most recent {MONTH_ROW_CAP} transactions for this month — narrow with search to
+						see the rest.
+					</p>
+				{/if}
+				{#if totalPages > 1}
+					<nav class="pager" aria-label="Review queue pages">
+						{#each Array(totalPages) as _, index (index)}
+							<button
+								type="button"
+								class="pager-dot"
+								class:is-active={safePage === index + 1}
+								aria-label={`Page ${index + 1}`}
+								aria-current={safePage === index + 1 ? 'page' : undefined}
+								onclick={() => (currentPage = index + 1)}
+							>
+								{index + 1}
+							</button>
+						{/each}
+					</nav>
+				{/if}
 			{:else}
 				<div class="empty-state">No matching transactions in this period.</div>
 			{/if}
@@ -1353,6 +1400,53 @@
 	.table-shell {
 		overflow: hidden;
 		border-radius: 1.8rem;
+	}
+
+	.table-note {
+		margin: 0;
+		padding: 1rem 1rem 0;
+		color: var(--color-muted-foreground);
+		font-size: 0.85rem;
+		text-align: center;
+	}
+
+	.pager {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 0.5rem;
+		padding: 1.25rem 1rem 1rem;
+	}
+
+	.pager-dot {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.25rem;
+		height: 2.25rem;
+		padding: 0;
+		color: var(--color-primary);
+		background: rgb(93 112 82 / 10%);
+		border: 1px solid rgb(93 112 82 / 25%);
+		border-radius: 50%;
+		font: inherit;
+		font-size: 0.9rem;
+		font-weight: 800;
+		line-height: 1;
+		cursor: pointer;
+		transition:
+			background-color 150ms ease,
+			color 150ms ease;
+	}
+
+	.pager-dot:hover {
+		background: rgb(93 112 82 / 20%);
+	}
+
+	.pager-dot.is-active {
+		color: var(--color-primary-foreground);
+		background: var(--color-primary);
+		border-color: var(--color-primary);
 	}
 
 	table {

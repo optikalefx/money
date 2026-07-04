@@ -32,15 +32,21 @@ const transactionFiltersValidator = {
 	search: v.optional(v.string())
 };
 
+// Hard ceiling on transactions shipped to the client for one month. The review table pages over
+// these client-side, so a normal month (well under this) loads in full and the pager is accurate.
+// A month exceeding this is truncated (surfaced in the UI) — that's the point at which we'd move to
+// server-side pagination. Keep in sync with `MONTH_ROW_CAP` in src/routes/+page.svelte.
+const MONTH_ROW_CAP = 500;
+
 export const listRecentTransactions = query({
 	args: transactionFiltersValidator,
 	handler: async (ctx, args) => {
-		const limit = Math.min(args.limit ?? 50, 100);
+		const limit = Math.min(args.limit ?? 100, MONTH_ROW_CAP);
 		const term = args.search?.trim().toLowerCase();
-		// With a search active, scan the whole selected month (not just the first `limit` rows) so
-		// matches aren't hidden by the row cap. Matching runs below over both charge-level and
-		// resolved line-item fields (title + canonical category), then we trim back to `limit`.
-		const scanLimit = term ? 1000 : limit;
+		// With a search active, scan wider than `limit` so matches beyond the first rows still
+		// surface. Matching runs below over both charge-level and resolved line-item fields (title +
+		// canonical category), then we trim back to `limit`.
+		const scanLimit = term ? Math.max(limit, 1000) : limit;
 		const rows = await readTransactions(ctx, {
 			limit: scanLimit,
 			startDate: args.startDate,
