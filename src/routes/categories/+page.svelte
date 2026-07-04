@@ -8,6 +8,7 @@
 	import Section from '$lib/Section.svelte';
 	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
 	import Button from '$lib/Button.svelte';
+	import { tooltip } from '$lib/tooltip';
 
 	type CategoryTreatment = 'expected' | 'transfer' | null;
 	type CategoryRow = {
@@ -295,14 +296,16 @@
 				>
 					Suggest categories
 				</Button>
-				<Button
-					variant="primary"
-					onclick={runCategorize}
-					loading={isCategorizing}
-					loadingLabel="Categorizing..."
-				>
-					Categorize transactions
-				</Button>
+				<span use:tooltip={'Will categorize uncategorized categories'}>
+					<Button
+						variant="primary"
+						onclick={runCategorize}
+						loading={isCategorizing}
+						loadingLabel="Categorizing..."
+					>
+						Categorize transactions
+					</Button>
+				</span>
 			</div>
 		</div>
 	</section>
