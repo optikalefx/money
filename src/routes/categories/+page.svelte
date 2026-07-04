@@ -112,12 +112,14 @@
 		errorMessage = '';
 		try {
 			await upsertCategory({ name: newName, description: newDescription });
-			statusMessage = `Added ${newName.trim()}.`;
 			newName = '';
 			newDescription = '';
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to add category.';
+			return;
 		}
+		// The new bucket may claim previously-uncategorized spend — sort it now.
+		await categorizeUncategorized(false);
 	}
 
 	async function changeTreatment(row: CategoryRow, treatment: CategoryTreatment) {
@@ -154,12 +156,15 @@
 		}
 	}
 
-	async function runCategorize() {
+	// Run the AI over everything still uncategorized. Shared by the manual button and the
+	// auto-runs after a new bucket appears (adding a category or accepting a suggestion) — that
+	// bucket may claim spend that was previously clamped to Uncategorized.
+	async function categorizeUncategorized(force: boolean) {
 		isCategorizing = true;
 		errorMessage = '';
 		statusMessage = 'Categorizing transactions with AI...';
 		try {
-			const result = await categorize({ force: forceRun });
+			const result = await categorize({ force });
 			if (result.categorized === 0) {
 				statusMessage =
 					result.applied === 0
@@ -173,6 +178,10 @@
 		} finally {
 			isCategorizing = false;
 		}
+	}
+
+	async function runCategorize() {
+		await categorizeUncategorized(forceRun);
 	}
 
 	async function runSuggest() {
@@ -198,13 +207,15 @@
 		suggestionActionId = suggestion.id;
 		errorMessage = '';
 		try {
-			const result = await acceptSuggestion({ id: suggestion.id });
-			statusMessage = `Added ${suggestion.name} and moved ${result.applied} record${result.applied === 1 ? '' : 's'} into it.`;
+			await acceptSuggestion({ id: suggestion.id });
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to accept suggestion.';
+			return;
 		} finally {
 			suggestionActionId = null;
 		}
+		// The accepted bucket may claim more previously-uncategorized spend — sort it now.
+		await categorizeUncategorized(false);
 	}
 
 	async function dismissOne(suggestion: Suggestion) {
