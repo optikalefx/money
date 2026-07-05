@@ -1629,8 +1629,13 @@
 			flex-direction: column;
 		}
 
+		/* Keep label + amount on one row inside the narrow side-by-side cards —
+		   let the label column shrink (ellipsis handles overflow) and scale the text. */
 		.bar-row {
-			grid-template-columns: 1fr;
+			grid-template-columns: minmax(0, 1fr) max-content;
+			gap: 0.5rem;
+			padding: 0.4rem 0.5rem;
+			font-size: 0.85rem;
 		}
 	}
 
