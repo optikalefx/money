@@ -91,6 +91,13 @@ Convex actions, so all Plaid credentials live in Convex env vars.
 3. In the app, click **Connect Plaid** to launch Plaid Link and connect an institution, then
    **Sync now** to import transactions.
 
+On connect, the app requests up to **12 months** of history (Plaid's default is 90 days; the
+institution may return less). Plaid delivers older history asynchronously and notifies a webhook at
+`${PUBLIC_CONVEX_SITE_URL}/plaid/webhook`, which re-runs the sync automatically — so backfill keeps
+flowing without a manual **Sync now**. No webhook setup is needed; the URL is registered on the link
+token from `CONVEX_SITE_URL`. Note that both the 12-month depth and the webhook apply to **newly
+linked** items, so re-link an existing connection to pick them up.
+
 ### 5. Gmail + Amazon (Google Cloud)
 
 The Gmail integration uses a server-side OAuth authorization-code flow. The callback is a Convex

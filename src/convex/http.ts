@@ -84,6 +84,29 @@ http.route({
 	})
 });
 
+// --- Plaid webhook --------------------------------------------------------------------------
+// Plaid posts TRANSACTIONS webhooks when new or backfilled transactions are available — notably the
+// async historical backfill that arrives minutes/hours after a fresh link. Re-run the cursor sync so
+// that data lands without a manual "Sync now". Scheduled (not awaited) so we ack Plaid immediately.
+// The endpoint writes nothing from the request body — worst case a forged call triggers a redundant,
+// idempotent sync — so JWT webhook verification is intentionally skipped for this personal app.
+http.route({
+	path: '/plaid/webhook',
+	method: 'POST',
+	handler: httpAction(async (ctx, request) => {
+		let payload: { webhook_type?: string };
+		try {
+			payload = await request.json();
+		} catch {
+			return new Response('Bad request', { status: 400 });
+		}
+		if (payload.webhook_type === 'TRANSACTIONS') {
+			await ctx.scheduler.runAfter(0, internal.plaidActions.syncAllItemsInternal, {});
+		}
+		return new Response(null, { status: 200 });
+	})
+});
+
 http.route({
 	path: '/gmail/callback',
 	method: 'GET',

@@ -10,7 +10,7 @@ import {
 	type Transaction
 } from 'plaid';
 import { v } from 'convex/values';
-import { env, type ActionCtx } from './_generated/server';
+import { env, internalAction, type ActionCtx } from './_generated/server';
 import { authedAction as action } from './authed';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
@@ -85,6 +85,7 @@ export const createLinkToken = action({
 	handler: async () => {
 		const client = plaidClient();
 		const redirectUri = env.PLAID_REDIRECT_URI;
+		const siteUrl = process.env.CONVEX_SITE_URL;
 		const response = await client.linkTokenCreate({
 			user: {
 				client_user_id: 'personal-money-tracker'
@@ -93,7 +94,14 @@ export const createLinkToken = action({
 			products: [Products.Transactions],
 			country_codes: [CountryCode.Us],
 			language: 'en',
-			redirect_uri: redirectUri || undefined
+			redirect_uri: redirectUri || undefined,
+			// Ask for up to 12 months of history (Plaid's default is 90 days). The institution may
+			// return less initially; the remainder is backfilled asynchronously and pulled in when
+			// Plaid fires the transactions webhook below. Applies to newly linked items only.
+			transactions: { days_requested: 365 },
+			// Plaid posts here (on the `.convex.site` domain) when new or backfilled transactions are
+			// available, so history keeps flowing in without a manual "Sync now".
+			webhook: siteUrl ? `${siteUrl}/plaid/webhook` : undefined
 		});
 
 		return {
@@ -152,31 +160,40 @@ export const exchangePublicToken = action({
 
 export const syncAllItems = action({
 	args: {},
-	handler: async (ctx) => {
-		const items: Array<{
-			_id: Id<'plaidItems'>;
-			accessToken: string;
-			cursor?: string;
-		}> = await ctx.runQuery(internal.plaid.listActiveItems, {});
-		const results = [];
-
-		for (const item of items) {
-			const result = await syncItem(ctx, item);
-			results.push(result);
-		}
-
-		// Newly imported/changed transactions land in Uncategorized until the AI categorizer runs.
-		// Chain it here so a sync (from the UI button, a cron, or a manual run) always categorizes
-		// new merchants — it only calls the model for merchants not already cached, so a no-op sync
-		// is cheap. Scheduled (not awaited) so the sync result returns promptly.
-		const changed = results.reduce((sum, result) => sum + result.added + result.modified, 0);
-		if (changed > 0) {
-			await ctx.scheduler.runAfter(0, internal.aiActions.categorizeTransactionsInternal, {});
-		}
-
-		return results;
-	}
+	handler: async (ctx) => runSyncAll(ctx)
 });
+
+// Same sync, invoked by the Plaid webhook (which arrives with no user identity, so it can't go
+// through the auth-guarded public action above). See the `/plaid/webhook` route in http.ts.
+export const syncAllItemsInternal = internalAction({
+	args: {},
+	handler: async (ctx) => runSyncAll(ctx)
+});
+
+async function runSyncAll(ctx: ActionCtx) {
+	const items: Array<{
+		_id: Id<'plaidItems'>;
+		accessToken: string;
+		cursor?: string;
+	}> = await ctx.runQuery(internal.plaid.listActiveItems, {});
+	const results = [];
+
+	for (const item of items) {
+		const result = await syncItem(ctx, item);
+		results.push(result);
+	}
+
+	// Newly imported/changed transactions land in Uncategorized until the AI categorizer runs.
+	// Chain it here so a sync (from the UI button, a cron, or a manual run) always categorizes
+	// new merchants — it only calls the model for merchants not already cached, so a no-op sync
+	// is cheap. Scheduled (not awaited) so the sync result returns promptly.
+	const changed = results.reduce((sum, result) => sum + result.added + result.modified, 0);
+	if (changed > 0) {
+		await ctx.scheduler.runAfter(0, internal.aiActions.categorizeTransactionsInternal, {});
+	}
+
+	return results;
+}
 
 async function syncItem(
 	ctx: ActionCtx,
