@@ -672,6 +672,11 @@ export const getSuggestionTransactions = query({
 			merchant: string;
 			amount: number | null;
 			source: string;
+			// The member unit this row belongs to. Categorization (and therefore exclusion) happens
+			// at this granularity: an itemized order line is its own `(item, sku)` unit, while plain
+			// charges that share a merchant are one `merchant` unit. `${kind}:${key}` ids it.
+			memberKind: 'merchant' | 'item';
+			memberKey: string;
 			// Whether this line is already pulled out of dynamic by a rule/treatment.
 			status: 'recurring' | 'expected' | 'transfer' | null;
 		}> = [];
@@ -690,6 +695,8 @@ export const getSuggestionTransactions = query({
 						merchant: t.merchantName ?? t.name,
 						amount: t.amount,
 						source: 'plaid',
+						memberKind: 'merchant',
+						memberKey: member.key,
 						status: ruleStatusFor(
 							{ merchant: t.normalizedMerchant, sku: null },
 							t.normalizedMerchant,
@@ -714,6 +721,8 @@ export const getSuggestionTransactions = query({
 						merchant,
 						amount: item.amount ?? null,
 						source: order?.source ?? 'order',
+						memberKind: 'item',
+						memberKey: member.key,
 						status: ruleStatusFor(
 							{ merchant, sku: item.sku ?? null },
 							matched?.normalizedMerchant ?? '',
@@ -729,12 +738,17 @@ export const getSuggestionTransactions = query({
 });
 
 export const acceptCategorySuggestion = mutation({
-	args: { id: v.id('categorySuggestions') },
+	// `excludedMembers` holds `${kind}:${key}` unit ids the user opted out of in the expand view;
+	// those units are left in Uncategorized instead of being moved into the new category. An itemized
+	// order line is its own unit, so this excludes a single product; plain charges sharing a merchant
+	// are one unit, so excluding one excludes that merchant.
+	args: { id: v.id('categorySuggestions'), excludedMembers: v.optional(v.array(v.string())) },
 	handler: async (ctx, args) => {
 		const suggestion = await ctx.db.get(args.id);
 		if (!suggestion || suggestion.status !== 'pending') {
 			throw new Error('Suggestion is no longer available.');
 		}
+		const excluded = new Set(args.excludedMembers ?? []);
 		const now = Date.now();
 
 		// Create the category (unique slug), placed after existing ones.
@@ -752,9 +766,11 @@ export const acceptCategorySuggestion = mutation({
 			updatedAt: now
 		});
 
-		// Move its member units out of Uncategorized into the new category.
+		// Move its member units out of Uncategorized into the new category, skipping any the user
+		// excluded in the expand view (those stay Uncategorized).
 		let applied = 0;
 		for (const member of suggestion.members) {
+			if (excluded.has(`${member.kind}:${member.key}`)) continue;
 			if (member.kind === 'merchant') {
 				applied += await applyMerchantCategory(ctx, member.key, slug, { model: suggestion.model });
 			} else if (member.merchant) {

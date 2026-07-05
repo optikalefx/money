@@ -52,6 +52,9 @@
 	let isSuggesting = $state(false);
 	let suggestionActionId = $state<string | null>(null);
 	let expandedSuggestionId = $state<string | null>(null);
+	// Member ids (`${kind}:${key}`) the user opted out of, per suggestion. Excluded units are
+	// left Uncategorized when the suggestion is accepted.
+	let excludedMembers = $state<Record<string, string[]>>({});
 	let statusMessage = $state('');
 	let errorMessage = $state('');
 
@@ -203,11 +206,22 @@
 		}
 	}
 
+	function toggleExcluded(suggestionId: string, memberId: string) {
+		const current = excludedMembers[suggestionId] ?? [];
+		excludedMembers[suggestionId] = current.includes(memberId)
+			? current.filter((m) => m !== memberId)
+			: [...current, memberId];
+	}
+
 	async function acceptOne(suggestion: Suggestion) {
 		suggestionActionId = suggestion.id;
 		errorMessage = '';
 		try {
-			await acceptSuggestion({ id: suggestion.id });
+			await acceptSuggestion({
+				id: suggestion.id,
+				excludedMembers: excludedMembers[suggestion.id] ?? []
+			});
+			delete excludedMembers[suggestion.id];
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to accept suggestion.';
 			return;
@@ -223,6 +237,7 @@
 		errorMessage = '';
 		try {
 			await dismissSuggestion({ id: suggestion.id });
+			delete excludedMembers[suggestion.id];
 			statusMessage = `Dismissed ${suggestion.name}.`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to dismiss suggestion.';
@@ -326,6 +341,7 @@
 			<div class="suggestion-list">
 				{#each suggestionRows as suggestion (suggestion.id)}
 					{@const isExpanded = expandedSuggestionId === suggestion.id}
+					{@const excludedCount = (excludedMembers[suggestion.id] ?? []).length}
 					<article class="suggestion-card">
 						<div class="suggestion-head">
 							<div class="suggestion-main">
@@ -361,6 +377,9 @@
 								>
 									Accept
 								</button>
+								{#if excludedCount}
+									<span class="excluded-note">{excludedCount} excluded</span>
+								{/if}
 								<button
 									type="button"
 									class="text-action"
@@ -372,7 +391,11 @@
 							</div>
 						</div>
 						{#if isExpanded}
-							<SuggestionTransactions id={suggestion.id} />
+							<SuggestionTransactions
+								id={suggestion.id}
+								excluded={excludedMembers[suggestion.id] ?? []}
+								onToggle={(memberId) => toggleExcluded(suggestion.id, memberId)}
+							/>
 						{/if}
 					</article>
 				{/each}
@@ -648,6 +671,12 @@
 		flex-direction: column;
 		gap: 0.5rem;
 		align-items: end;
+	}
+
+	.excluded-note {
+		color: var(--color-muted-foreground);
+		font-size: 0.75rem;
+		font-weight: 800;
 	}
 
 	@media (max-width: 640px) {

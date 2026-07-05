@@ -3,7 +3,16 @@
 	import { api } from '../convex/_generated/api.js';
 	import type { Id } from '../convex/_generated/dataModel.js';
 
-	let { id }: { id: Id<'categorySuggestions'> } = $props();
+	let {
+		id,
+		excluded = [],
+		onToggle
+	}: {
+		id: Id<'categorySuggestions'>;
+		// `${memberKind}:${memberKey}` ids the user has opted out of, owned by the parent.
+		excluded?: string[];
+		onToggle: (memberId: string) => void;
+	} = $props();
 
 	const txns = useQuery(api.categories.getSuggestionTransactions, () => ({ id }));
 	const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
@@ -30,10 +39,14 @@
 			<span class="txn-merchant">Merchant</span>
 			<span class="txn-status">Status</span>
 			<span class="txn-amount">Amount</span>
+			<span class="txn-action"></span>
 		</div>
 		<ul class="txn-list">
 			{#each txns.data as txn, i (i)}
-				<li class="txn-row">
+				{@const memberId = `${txn.memberKind}:${txn.memberKey}`}
+				{@const isExcluded = excluded.includes(memberId)}
+				{@const unitNoun = txn.memberKind === 'merchant' ? 'merchant' : 'item'}
+				<li class="txn-row" class:is-excluded={isExcluded}>
 					<span class="txn-date">{txn.date || '—'}</span>
 					<span class="txn-name">{txn.name}</span>
 					<span class="txn-merchant">{txn.merchant}</span>
@@ -43,6 +56,21 @@
 						{/if}
 					</span>
 					<span class="txn-amount">{formatAmount(txn.amount)}</span>
+					<span class="txn-action">
+						<button
+							type="button"
+							class="exclude-btn"
+							aria-pressed={isExcluded}
+							title={isExcluded
+								? `Put this ${unitNoun} back in the category`
+								: `Keep this ${unitNoun} uncategorized when accepting${
+										txn.memberKind === 'merchant' ? ' (covers every charge from it)' : ''
+									}`}
+							onclick={() => onToggle(memberId)}
+						>
+							{isExcluded ? 'Include' : 'Exclude'}
+						</button>
+					</span>
 				</li>
 			{/each}
 		</ul>
@@ -60,7 +88,7 @@
 
 	.txn-head {
 		display: grid;
-		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) 6rem 6rem;
+		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) 6rem 6rem 5rem;
 		gap: 0.75rem;
 		padding: 0 0 0.35rem;
 		border-bottom: 1px solid rgb(222 216 207 / 70%);
@@ -75,6 +103,42 @@
 		text-align: right;
 	}
 
+	.txn-action {
+		text-align: right;
+	}
+
+	.exclude-btn {
+		padding: 0.15rem 0.55rem;
+		color: var(--color-muted-foreground);
+		background: transparent;
+		border: 1px solid rgb(222 216 207 / 80%);
+		border-radius: var(--radius-pill);
+		font-size: 0.72rem;
+		font-weight: 800;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+
+	.exclude-btn:hover {
+		color: var(--color-destructive);
+		border-color: var(--color-destructive);
+	}
+
+	/* Excluded rows read as struck-through and dimmed; the button flips to "Include". */
+	.txn-row.is-excluded {
+		opacity: 0.5;
+	}
+
+	.txn-row.is-excluded .txn-name,
+	.txn-row.is-excluded .txn-amount {
+		text-decoration: line-through;
+	}
+
+	.txn-row.is-excluded .exclude-btn {
+		color: var(--color-primary);
+		border-color: var(--color-primary);
+	}
+
 	.txn-list {
 		display: grid;
 		gap: 0.15rem;
@@ -85,7 +149,7 @@
 
 	.txn-row {
 		display: grid;
-		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) 6rem 6rem;
+		grid-template-columns: 6rem minmax(0, 2fr) minmax(0, 1fr) 6rem 6rem 5rem;
 		gap: 0.75rem;
 		align-items: center;
 		padding: 0.3rem 0;
@@ -173,6 +237,11 @@
 		.txn-amount {
 			grid-row: 1;
 			grid-column: 2;
+		}
+
+		.txn-action {
+			grid-column: 2;
+			justify-self: end;
 		}
 	}
 </style>
