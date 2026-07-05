@@ -222,14 +222,18 @@
 				excludedMembers: excludedMembers[suggestion.id] ?? []
 			});
 			delete excludedMembers[suggestion.id];
+			statusMessage = `Accepted ${suggestion.name}.`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to accept suggestion.';
 			return;
 		} finally {
 			suggestionActionId = null;
 		}
-		// The accepted bucket may claim more previously-uncategorized spend — sort it now.
-		await categorizeUncategorized(false);
+		// The accept mutation already moved this suggestion's members into the new bucket. A sweep can
+		// still claim uncategorized spend that wasn't in the suggestion (units beyond the suggest cap,
+		// or ones the model punted to "none"), so fire it in the background — the user needn't wait on
+		// it, and the reactive queries update when it lands.
+		categorize({ force: false }).catch(() => {});
 	}
 
 	async function dismissOne(suggestion: Suggestion) {
