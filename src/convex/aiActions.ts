@@ -1,8 +1,9 @@
 'use node';
 
 import { v } from 'convex/values';
-import { action, env } from './_generated/server';
-import { api, internal } from './_generated/api';
+import { env, internalAction } from './_generated/server';
+import { authedAction as action } from './authed';
+import { internal } from './_generated/api';
 import { generateObject } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -39,25 +40,34 @@ function chunk<T>(items: T[], size: number): T[][] {
 	return chunks;
 }
 
+type CategorizeResult = {
+	categorized: number;
+	skipped: number;
+	applied: number;
+	cacheApplied: number;
+	merchantUnits: number;
+	itemUnits: number;
+	chunks: number;
+};
+
+// Client entry point: auth-guarded, then delegates to the internal worker below so the exact
+// same logic can also run unauthenticated from the post-sync scheduler.
 export const categorizeTransactions = action({
 	args: { force: v.optional(v.boolean()) },
-	handler: async (
-		ctx,
-		args
-	): Promise<{
-		categorized: number;
-		skipped: number;
-		applied: number;
-		cacheApplied: number;
-		merchantUnits: number;
-		itemUnits: number;
-		chunks: number;
-	}> => {
+	handler: async (ctx, args): Promise<CategorizeResult> => {
+		return await ctx.runAction(internal.aiActions.categorizeTransactionsInternal, args);
+	}
+});
+
+// Invoked by the Plaid/Gmail sync scheduler (no user identity) and by the client entry point above.
+export const categorizeTransactionsInternal = internalAction({
+	args: { force: v.optional(v.boolean()) },
+	handler: async (ctx, args): Promise<CategorizeResult> => {
 		// Guarantee the canonical taxonomy exists before we ask the model to assign to it. Otherwise
 		// (e.g. right after a data reset, or before the Categories page has ever been opened) there
 		// are no valid slugs and every unit clamps to `uncategorized`. Idempotent — a no-op once
 		// categories exist.
-		await ctx.runMutation(api.categories.ensureDefaultCategories, {});
+		await ctx.runMutation(internal.categories.ensureDefaultCategoriesInternal, {});
 
 		const input = await ctx.runQuery(internal.categories.getCategorizationInput, {
 			force: args.force ?? false
@@ -151,7 +161,8 @@ export const categorizeTransactions = action({
 
 		// Fold assignments back into merchant/item buckets for a single write.
 		const merchants: Array<{ normalizedMerchant: string; categorySlug: string }> = [];
-		const items: Array<{ merchant: string; sku: string; title?: string; categorySlug: string }> = [];
+		const items: Array<{ merchant: string; sku: string; title?: string; categorySlug: string }> =
+			[];
 		let categorized = 0;
 		let skipped = 0;
 
@@ -165,7 +176,12 @@ export const categorizeTransactions = action({
 			if (unit.kind === 'merchant') {
 				merchants.push({ normalizedMerchant: unit.normalizedMerchant, categorySlug: slug });
 			} else {
-				items.push({ merchant: unit.merchant, sku: unit.sku, title: unit.title, categorySlug: slug });
+				items.push({
+					merchant: unit.merchant,
+					sku: unit.sku,
+					title: unit.title,
+					categorySlug: slug
+				});
 			}
 		});
 

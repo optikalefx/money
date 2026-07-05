@@ -10,8 +10,9 @@ import {
 	type Transaction
 } from 'plaid';
 import { v } from 'convex/values';
-import { action, env, type ActionCtx } from './_generated/server';
-import { api, internal } from './_generated/api';
+import { env, type ActionCtx } from './_generated/server';
+import { authedAction as action } from './authed';
+import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 
 type PlaidEnvironment = 'sandbox' | 'development' | 'production';
@@ -170,7 +171,7 @@ export const syncAllItems = action({
 		// is cheap. Scheduled (not awaited) so the sync result returns promptly.
 		const changed = results.reduce((sum, result) => sum + result.added + result.modified, 0);
 		if (changed > 0) {
-			await ctx.scheduler.runAfter(0, api.aiActions.categorizeTransactions, {});
+			await ctx.scheduler.runAfter(0, internal.aiActions.categorizeTransactionsInternal, {});
 		}
 
 		return results;

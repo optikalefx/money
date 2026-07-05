@@ -13,6 +13,11 @@ export default defineApp({
 		GOOGLE_REDIRECT_URI: v.optional(v.string()),
 		// Optional overrides. Defaults are applied in gmailActions.ts.
 		GMAIL_AMAZON_QUERY: v.optional(v.string()),
-		GMAIL_POST_AUTH_URL: v.optional(v.string())
+		GMAIL_POST_AUTH_URL: v.optional(v.string()),
+		// Owner auth. Set via `npm run auth:setup` (see README). Optional so the deployment can be
+		// pushed before auth is provisioned; the login/JWKS routes return errors until they exist.
+		OWNER_PASSWORD: v.optional(v.string()),
+		JWT_PRIVATE_KEY: v.optional(v.string()),
+		JWKS: v.optional(v.string())
 	}
 });

@@ -11,7 +11,8 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check . && eslint .",
-		"format": "prettier --write ."
+		"format": "prettier --write .",
+		"auth:setup": "node scripts/auth-setup.mjs"
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
@@ -37,7 +38,9 @@
 		"@faker-js/faker": "^10.5.0",
 		"ai": "^7.0.9",
 		"convex": "^1.42.1",
+		"convex-helpers": "^0.1.120",
 		"convex-svelte": "^0.14.0",
+		"jose": "^6.2.3",
 		"plaid": "^43.0.0",
 		"tippy.js": "^6.3.7",
 		"zod": "^4.4.3"

@@ -30,7 +30,10 @@ type Env = {
   readonly GOOGLE_CLIENT_ID: string | undefined;
   readonly GOOGLE_CLIENT_SECRET: string | undefined;
   readonly GOOGLE_REDIRECT_URI: string | undefined;
+  readonly JWKS: string | undefined;
+  readonly JWT_PRIVATE_KEY: string | undefined;
   readonly OPENAI_API_KEY: string | undefined;
+  readonly OWNER_PASSWORD: string | undefined;
   readonly PLAID_CLIENT_ID: string;
   readonly PLAID_ENV: string;
   readonly PLAID_REDIRECT_URI: string | undefined;

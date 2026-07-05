@@ -1,10 +1,6 @@
 import { v } from 'convex/values';
-import {
-	internalMutation,
-	internalQuery,
-	query,
-	type MutationCtx
-} from './_generated/server';
+import { internalMutation, internalQuery, type MutationCtx } from './_generated/server';
+import { authedQuery as query } from './authed';
 import type { Id } from './_generated/dataModel';
 import { rebindUnmatchedOrders } from './gmail';
 

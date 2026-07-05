@@ -39,6 +39,33 @@ npm run dev
 The app is now running at http://localhost:5173. The integration credentials below are all stored
 **server-side in Convex only** (set with `npx convex env set`), never in the frontend or in git.
 
+## Authentication
+
+The app is single-user and gated behind an owner password. **Every Convex function requires a valid
+session**, so your financial data is never exposed to anyone who merely knows your deployment URL.
+
+**How it works:** signing in POSTs your password to a Convex HTTP action (`/auth/login`), which
+returns a short-lived signed **JWT** (RS256, ~30 days). The browser keeps that token and attaches it
+to every Convex request; Convex verifies it against the public key published at
+`${PUBLIC_CONVEX_SITE_URL}/.well-known/jwks.json` (note the `.convex.site` domain). There is **no
+sign-up screen and no account table** — the password _is_ the credential and lives only as a Convex
+env var. Because it's exchanged once for a token, your password is never sent on later requests.
+
+**Provision it once** with the bundled script. It generates the RS256 signing key pair and sets all
+three auth env vars for you, prompting for the password so it stays out of your shell history:
+
+```sh
+npm run auth:setup            # configures your dev deployment
+npm run auth:setup -- --prod  # configures your production deployment
+```
+
+Re-run it anytime to rotate the key and/or password. Then open the app and sign in. To change only
+the password later:
+
+```sh
+npx convex env set OWNER_PASSWORD <new-password>   # add --prod for production
+```
+
 ## Integrations
 
 This app syncs bank transactions from Plaid and Amazon order details from Gmail, and can classify
@@ -61,7 +88,7 @@ Convex actions, so all Plaid credentials live in Convex env vars.
 
    Repeat with `--prod` to configure your production Convex deployment.
 
-4. In the app, click **Connect Plaid** to launch Plaid Link and connect an institution, then
+3. In the app, click **Connect Plaid** to launch Plaid Link and connect an institution, then
    **Sync now** to import transactions.
 
 ### 5. Gmail + Amazon (Google Cloud)
@@ -123,16 +150,19 @@ Anthropic). It's optional — the app works fully without it.
 
 Here is the full list of env vars you need.
 
-| Variable               | Required | Used for                                                                 |
-| ---------------------- | -------- | ------------------------------------------------------------------------ |
-| `PLAID_CLIENT_ID`      | Yes      | Plaid API client id.                                                     |
-| `PLAID_SECRET`         | Yes      | Plaid API secret for the chosen environment.                            |
-| `PLAID_ENV`            | Yes      | Selects the Plaid API host: `sandbox`, `development`, or `production`.   |
-| `GOOGLE_CLIENT_ID`     | No       | Gmail/Amazon OAuth (shared across deployments).                         |
-| `GOOGLE_CLIENT_SECRET` | No       | Gmail/Amazon OAuth (shared across deployments).                         |
-| `GOOGLE_REDIRECT_URI`  | No       | Gmail OAuth callback — must match the deployment's own `.convex.site`.  |
-| `OPENAI_API_KEY`       | No       | AI-assisted transaction classification (OpenAI provider).               |
-| `ANTHROPIC_API_KEY`    | No       | AI-assisted transaction classification (Anthropic provider).            |
+| Variable               | Required | Used for                                                                           |
+| ---------------------- | -------- | ---------------------------------------------------------------------------------- |
+| `OWNER_PASSWORD`       | Yes      | Owner login password (set by `npm run auth:setup`).                                |
+| `JWT_PRIVATE_KEY`      | Yes      | RS256 private key that signs session tokens (set by `npm run auth:setup`).         |
+| `JWKS`                 | Yes      | Public key set Convex uses to verify session tokens (set by `npm run auth:setup`). |
+| `PLAID_CLIENT_ID`      | Yes      | Plaid API client id.                                                               |
+| `PLAID_SECRET`         | Yes      | Plaid API secret for the chosen environment.                                       |
+| `PLAID_ENV`            | Yes      | Selects the Plaid API host: `sandbox`, `development`, or `production`.             |
+| `GOOGLE_CLIENT_ID`     | No       | Gmail/Amazon OAuth (shared across deployments).                                    |
+| `GOOGLE_CLIENT_SECRET` | No       | Gmail/Amazon OAuth (shared across deployments).                                    |
+| `GOOGLE_REDIRECT_URI`  | No       | Gmail OAuth callback — must match the deployment's own `.convex.site`.             |
+| `OPENAI_API_KEY`       | No       | AI-assisted transaction classification (OpenAI provider).                          |
+| `ANTHROPIC_API_KEY`    | No       | AI-assisted transaction classification (Anthropic provider).                       |
 
 ## Building
 

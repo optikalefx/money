@@ -1,11 +1,6 @@
 import { v } from 'convex/values';
-import {
-	internalMutation,
-	internalQuery,
-	mutation,
-	query,
-	type MutationCtx
-} from './_generated/server';
+import { internalMutation, internalQuery, type MutationCtx } from './_generated/server';
+import { authedQuery as query } from './authed';
 import type { Doc, Id } from './_generated/dataModel';
 import { RETAILER_ADAPTERS } from './adapters';
 

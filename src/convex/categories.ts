@@ -1,11 +1,6 @@
 import { v } from 'convex/values';
-import {
-	internalMutation,
-	internalQuery,
-	mutation,
-	query,
-	type MutationCtx
-} from './_generated/server';
+import { internalMutation, internalQuery, type MutationCtx } from './_generated/server';
+import { authedQuery as query, authedMutation as mutation } from './authed';
 import { AI_MODELS, isAllowedModel } from './aiModels';
 import { loadResolutionData, ruleStatusFor } from './resolution';
 import { RETAILER_ADAPTERS } from './adapters';
@@ -100,28 +95,37 @@ export const listCategories = query({
 
 // Idempotent: seed the starter taxonomy only when the table is empty. Called from the
 // categories page on mount (queries can't write, so seeding lives in a mutation).
+async function seedDefaultCategories(ctx: MutationCtx) {
+	const existing = await ctx.db.query('categories').take(1);
+	if (existing.length > 0) return { seeded: 0 };
+
+	const now = Date.now();
+	let sortOrder = 0;
+	for (const category of DEFAULT_CATEGORIES) {
+		await ctx.db.insert('categories', {
+			slug: category.slug,
+			name: category.name,
+			description: category.description,
+			sortOrder: sortOrder++,
+			active: true,
+			isDefault: true,
+			createdAt: now,
+			updatedAt: now
+		});
+	}
+	return { seeded: DEFAULT_CATEGORIES.length };
+}
+
 export const ensureDefaultCategories = mutation({
 	args: {},
-	handler: async (ctx) => {
-		const existing = await ctx.db.query('categories').take(1);
-		if (existing.length > 0) return { seeded: 0 };
+	handler: async (ctx) => seedDefaultCategories(ctx)
+});
 
-		const now = Date.now();
-		let sortOrder = 0;
-		for (const category of DEFAULT_CATEGORIES) {
-			await ctx.db.insert('categories', {
-				slug: category.slug,
-				name: category.name,
-				description: category.description,
-				sortOrder: sortOrder++,
-				active: true,
-				isDefault: true,
-				createdAt: now,
-				updatedAt: now
-			});
-		}
-		return { seeded: DEFAULT_CATEGORIES.length };
-	}
+// Same seeding, but callable from the scheduler-driven categorizer (which runs with no user
+// identity and so can't go through the auth-guarded public mutation above).
+export const ensureDefaultCategoriesInternal = internalMutation({
+	args: {},
+	handler: async (ctx) => seedDefaultCategories(ctx)
 });
 
 export const upsertCategory = mutation({
@@ -313,7 +317,11 @@ export const getCategorizationInput = internalQuery({
 		// charges still needing the AI. A merchant is settled only if it has a real cached category or
 		// a manual pick — an AI-assigned `uncategorized` is a miss and gets retried every run (that's
 		// what Categorize is for). `force` re-sends everything.
-		const txns = await ctx.db.query('transactions').withIndex('by_date').order('desc').take(SCAN_LIMIT);
+		const txns = await ctx.db
+			.query('transactions')
+			.withIndex('by_date')
+			.order('desc')
+			.take(SCAN_LIMIT);
 		const merchantUnits = new Map<
 			string,
 			{ normalizedMerchant: string; name: string; plaidCategory: string }
@@ -395,9 +403,14 @@ export const saveCategoryAssignments = internalMutation({
 	handler: async (ctx, args) => {
 		let applied = 0;
 		for (const merchant of args.merchants) {
-			applied += await applyMerchantCategory(ctx, merchant.normalizedMerchant, merchant.categorySlug, {
-				model: args.model
-			});
+			applied += await applyMerchantCategory(
+				ctx,
+				merchant.normalizedMerchant,
+				merchant.categorySlug,
+				{
+					model: args.model
+				}
+			);
 		}
 		for (const item of args.items) {
 			applied += await applyItemCategory(ctx, item.merchant, item.sku, item.categorySlug, {
@@ -444,7 +457,14 @@ export async function applyMerchantCategory(
 		.withIndex('by_normalizedMerchant', (q) => q.eq('normalizedMerchant', normalizedMerchant))
 		.unique();
 	if (existing && existing.source === 'manual' && source === 'ai') return 0;
-	const doc = { normalizedMerchant, categorySlug, source, model: opts.model, active: true, updatedAt: now };
+	const doc = {
+		normalizedMerchant,
+		categorySlug,
+		source,
+		model: opts.model,
+		active: true,
+		updatedAt: now
+	};
 	if (existing) {
 		await ctx.db.patch(existing._id, doc);
 	} else {

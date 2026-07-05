@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
-import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
+import { type MutationCtx, type QueryCtx } from './_generated/server';
+import { authedQuery as query, authedMutation as mutation } from './authed';
 import type { Doc, Id } from './_generated/dataModel';
 import { applyMerchantCategory, applyItemCategory } from './categories';
 import {
@@ -109,7 +110,11 @@ export const listRecentTransactions = query({
 async function sourceAccountForTransaction(
 	ctx: QueryCtx,
 	transaction: { accountId?: Id<'accounts'> }
-): Promise<{ institutionName: string | null; accountName: string | null; accountMask: string | null }> {
+): Promise<{
+	institutionName: string | null;
+	accountName: string | null;
+	accountMask: string | null;
+}> {
 	if (!transaction.accountId) {
 		return { institutionName: null, accountName: null, accountMask: null };
 	}
@@ -137,7 +142,8 @@ async function resolvedLinesInRange(
 	const rows = await ctx.db
 		.query('transactions')
 		.withIndex('by_date', (q) => {
-			if (opts.startDate && opts.endDate) return q.gte('date', opts.startDate).lte('date', opts.endDate);
+			if (opts.startDate && opts.endDate)
+				return q.gte('date', opts.startDate).lte('date', opts.endDate);
 			if (opts.startDate) return q.gte('date', opts.startDate);
 			if (opts.endDate) return q.lte('date', opts.endDate);
 			return q;
@@ -186,7 +192,8 @@ export const getMonthlyDynamicBreakdown = query({
 
 		const addMerchant = (month: string, label: string, amount: number) => {
 			if (amount <= 0) return;
-			const monthMap = merchantsByMonth.get(month) ?? new Map<string, { total: number; count: number }>();
+			const monthMap =
+				merchantsByMonth.get(month) ?? new Map<string, { total: number; count: number }>();
 			const existing = monthMap.get(label) ?? { total: 0, count: 0 };
 			existing.total += amount;
 			existing.count += 1;
@@ -206,7 +213,8 @@ export const getMonthlyDynamicBreakdown = query({
 			const byCategory = [...monthMap.entries()]
 				.map(([slug, total]) => ({ slug, name: nameFor(slug), total }))
 				.sort((a, b) => b.total - a.total);
-			const merchantMap = merchantsByMonth.get(month) ?? new Map<string, { total: number; count: number }>();
+			const merchantMap =
+				merchantsByMonth.get(month) ?? new Map<string, { total: number; count: number }>();
 			const byMerchant = [...merchantMap.entries()]
 				.map(([label, { total, count }]) => ({ label, total, count }))
 				.sort((a, b) => b.total - a.total);
@@ -260,17 +268,19 @@ function groupLinesByUnit(
 		existing.months.add(transaction.date.slice(0, 7));
 		units.set(key, existing);
 	}
-	return [...units.values()].sort((a, b) => b.total - a.total).map((unit) => ({
-		key: unit.key,
-		merchant: unit.merchant,
-		sku: unit.sku,
-		asin: unit.sku,
-		normalizedMerchant: unit.normalizedMerchant,
-		label: unit.label,
-		total: unit.total,
-		count: unit.count,
-		monthly: unit.total / Math.max(unit.months.size, 1)
-	}));
+	return [...units.values()]
+		.sort((a, b) => b.total - a.total)
+		.map((unit) => ({
+			key: unit.key,
+			merchant: unit.merchant,
+			sku: unit.sku,
+			asin: unit.sku,
+			normalizedMerchant: unit.normalizedMerchant,
+			label: unit.label,
+			total: unit.total,
+			count: unit.count,
+			monthly: unit.total / Math.max(unit.months.size, 1)
+		}));
 }
 
 export const getRecurringSummary = query({
@@ -666,7 +676,9 @@ export const setLineItemCategory = mutation({
 		if (!category || !category.active) throw new Error('Category not found.');
 
 		if (args.sku) {
-			await applyItemCategory(ctx, args.merchant, args.sku, args.categorySlug, { source: 'manual' });
+			await applyItemCategory(ctx, args.merchant, args.sku, args.categorySlug, {
+				source: 'manual'
+			});
 		} else {
 			await applyMerchantCategory(ctx, args.merchant, args.categorySlug, { source: 'manual' });
 		}

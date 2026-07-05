@@ -13,6 +13,8 @@ import type * as adapters_index from "../adapters/index.js";
 import type * as adapters_types from "../adapters/types.js";
 import type * as aiActions from "../aiActions.js";
 import type * as aiModels from "../aiModels.js";
+import type * as authNode from "../authNode.js";
+import type * as authed from "../authed.js";
 import type * as categories from "../categories.js";
 import type * as gmail from "../gmail.js";
 import type * as gmailActions from "../gmailActions.js";
@@ -21,6 +23,7 @@ import type * as plaid from "../plaid.js";
 import type * as plaidActions from "../plaidActions.js";
 import type * as reset from "../reset.js";
 import type * as resolution from "../resolution.js";
+import type * as session from "../session.js";
 import type * as transactions from "../transactions.js";
 
 import type {
@@ -35,6 +38,8 @@ declare const fullApi: ApiFromModules<{
   "adapters/types": typeof adapters_types;
   aiActions: typeof aiActions;
   aiModels: typeof aiModels;
+  authNode: typeof authNode;
+  authed: typeof authed;
   categories: typeof categories;
   gmail: typeof gmail;
   gmailActions: typeof gmailActions;
@@ -43,6 +48,7 @@ declare const fullApi: ApiFromModules<{
   plaidActions: typeof plaidActions;
   reset: typeof reset;
   resolution: typeof resolution;
+  session: typeof session;
   transactions: typeof transactions;
 }>;
 

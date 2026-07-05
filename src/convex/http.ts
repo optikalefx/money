@@ -18,6 +18,72 @@ function page(title: string, body: string, status = 200) {
 	);
 }
 
+// --- Owner auth -----------------------------------------------------------------------------
+// `/auth/login` trades the owner password for a short-lived signed JWT; every Convex function is
+// then guarded by verifying that token (see `authed.ts` + `auth.config.ts`). `/.well-known/jwks.json`
+// publishes the public key Convex uses to verify it. Login is a cross-origin fetch from the app, so
+// it needs CORS; the token is returned in the body (no cookies), which is why `*` is safe here.
+const corsHeaders = {
+	'access-control-allow-origin': '*',
+	'access-control-allow-methods': 'POST, OPTIONS',
+	'access-control-allow-headers': 'Content-Type'
+};
+
+function json(body: unknown, status = 200) {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { 'content-type': 'application/json', ...corsHeaders }
+	});
+}
+
+// Constant-time string compare so an attacker can't learn the password from response timing.
+function constantTimeEqual(a: string, b: string) {
+	if (a.length !== b.length) return false;
+	let mismatch = 0;
+	for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return mismatch === 0;
+}
+
+http.route({
+	path: '/.well-known/jwks.json',
+	method: 'GET',
+	handler: httpAction(async () => {
+		const jwks = env.JWKS || '{"keys":[]}';
+		return new Response(jwks, {
+			status: 200,
+			headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=3600' }
+		});
+	})
+});
+
+http.route({
+	path: '/auth/login',
+	method: 'OPTIONS',
+	handler: httpAction(async () => new Response(null, { status: 204, headers: corsHeaders }))
+});
+
+http.route({
+	path: '/auth/login',
+	method: 'POST',
+	handler: httpAction(async (ctx, request) => {
+		let body: { password?: string };
+		try {
+			body = await request.json();
+		} catch {
+			return json({ error: 'Bad request.' }, 400);
+		}
+		const expected = env.OWNER_PASSWORD;
+		if (!expected) {
+			return json({ error: 'Auth is not configured. Run `npm run auth:setup`.' }, 500);
+		}
+		if (!body.password || !constantTimeEqual(body.password, expected)) {
+			return json({ error: 'Invalid password.' }, 401);
+		}
+		const token: string = await ctx.runAction(internal.authNode.mintOwnerToken, {});
+		return json({ token }, 200);
+	})
+});
+
 http.route({
 	path: '/gmail/callback',
 	method: 'GET',
