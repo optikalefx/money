@@ -2,6 +2,30 @@
 
 This app's job answers one simple question. Where the heck is my money going? It's great to have a budget, but does that budget match your reality? Even if you think you have everything planned out, how much are you actually spending OUTSIDE of your budget? And on what? This app shows you just that.
 
+## Features
+
+**Bank sync (Plaid)**
+
+- Imports transactions from your linked accounts; requests up to 12 months of history.
+- Auto-backfills newly available history via a Plaid webhook — no manual re-sync.
+- One-click **Reconnect** to re-link and pull the full window (your rules are preserved).
+
+**Amazon / Gmail orders**
+
+- Scans the last year of Amazon order emails and matches each to its bank charge, so a charge
+  shows the actual items — not just "Amazon."
+- Matches on amount within a ship-lag date window (falls back to a standalone row when no charge
+  is found), and **Re-match orders to charges** re-runs matching across all history on demand.
+
+**Categorization & reporting**
+
+- AI-assisted categories (OpenAI or Anthropic) plus per-merchant / per-item rules.
+- Month-over-month "unplanned spending" trend, by category and top merchants.
+
+**Access**
+
+- Single-owner login (password → signed session); every backend function requires it.
+
 ## Running it yourself
 
 This app is free, BUT it is NOT hosted anywhere for you to use. I tried to make this so with light techincal knowledge you can use this yourself. Note that this isn't fully "local". It uses Convex as the database, because I love convex. But it's going to be YOUR convex account. The reason it's not fully local is because I want this app to keep itself updated with Convex scheduled functions. Below is what you need to run the app.
