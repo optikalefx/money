@@ -118,6 +118,15 @@
 		() => ({ startMonth: windowStart, endMonth: windowEnd }),
 		{ keepPreviousData: true }
 	);
+	// Per-box "All Time" toggles. The all-time breakdown scans full history, so it stays skipped
+	// (unsubscribed) until at least one box is switched on.
+	let categoryAllTime = $state(false);
+	let merchantAllTime = $state(false);
+	const allTimeBreakdown = useQuery(
+		api.transactions.getAllTimeDynamicBreakdown,
+		() => (categoryAllTime || merchantAllTime ? {} : 'skip'),
+		{ keepPreviousData: true }
+	);
 	const categoriesQuery = useQuery(api.categories.listCategories, () => ({}));
 	const gmailStatus = useQuery(api.gmail.getConnectionStatus, () => ({}));
 	const createLinkToken = useAction(api.plaidActions.createLinkToken);
@@ -211,10 +220,19 @@
 		monthlyMonths.find((entry) => entry.month === selectedMonth)
 	);
 	const dynamicTotalMonthly = $derived(selectedMonthBreakdown?.total ?? 0);
-	const canonicalCategoryRows = $derived(selectedMonthBreakdown?.byCategory ?? []);
+	const canonicalCategoryRows = $derived(
+		categoryAllTime
+			? (allTimeBreakdown.data?.byCategory ?? [])
+			: (selectedMonthBreakdown?.byCategory ?? [])
+	);
 	// Top merchants is server-computed (like the category breakdown) so it reflects the whole month,
 	// not just the ≤100 rows loaded for the review table below.
-	const dynamicByMerchant = $derived((selectedMonthBreakdown?.byMerchant ?? []).slice(0, 8));
+	const dynamicByMerchant = $derived(
+		(merchantAllTime
+			? (allTimeBreakdown.data?.byMerchant ?? [])
+			: (selectedMonthBreakdown?.byMerchant ?? [])
+		).slice(0, 8)
+	);
 	const maxMonthTotal = $derived(
 		monthlyMonths.reduce((max, entry) => Math.max(max, entry.total), 0)
 	);
@@ -700,9 +718,17 @@
 		<div class="insight-panel organic-surface">
 			<div class="section-heading compact">
 				<div>
-					<p class="eyebrow">{formatMonthLong(selectedMonth)}</p>
+					<p class="eyebrow">{categoryAllTime ? 'All time' : formatMonthLong(selectedMonth)}</p>
 					<h2>By category</h2>
 				</div>
+				<button
+					type="button"
+					class="range-toggle"
+					class:is-active={categoryAllTime}
+					onclick={() => (categoryAllTime = !categoryAllTime)}
+				>
+					{categoryAllTime ? formatMonthLong(selectedMonth) : 'All time'}
+				</button>
 			</div>
 
 			<div class="bar-list">
@@ -720,7 +746,13 @@
 						<b>{formatAmount(row.total)}</b>
 					</button>
 				{:else}
-					<div class="empty-state">No categorized dynamic spend for this month.</div>
+					<div class="empty-state">
+						{#if categoryAllTime && allTimeBreakdown.isLoading}
+							Loading all-time totals…
+						{:else}
+							No categorized dynamic spend {categoryAllTime ? 'yet' : 'for this month'}.
+						{/if}
+					</div>
 				{/each}
 			</div>
 		</div>
@@ -728,9 +760,17 @@
 		<div class="insight-panel organic-surface">
 			<div class="section-heading compact">
 				<div>
-					<p class="eyebrow">{formatMonthLong(selectedMonth)}</p>
+					<p class="eyebrow">{merchantAllTime ? 'All time' : formatMonthLong(selectedMonth)}</p>
 					<h2>Top merchants</h2>
 				</div>
+				<button
+					type="button"
+					class="range-toggle"
+					class:is-active={merchantAllTime}
+					onclick={() => (merchantAllTime = !merchantAllTime)}
+				>
+					{merchantAllTime ? formatMonthLong(selectedMonth) : 'All time'}
+				</button>
 			</div>
 
 			<div class="bar-list">
@@ -749,7 +789,13 @@
 						<b>{formatAmount(row.total)}</b>
 					</button>
 				{:else}
-					<div class="empty-state">No dynamic merchants for this month.</div>
+					<div class="empty-state">
+						{#if merchantAllTime && allTimeBreakdown.isLoading}
+							Loading all-time totals…
+						{:else}
+							No dynamic merchants {merchantAllTime ? 'yet' : 'for this month'}.
+						{/if}
+					</div>
 				{/each}
 			</div>
 		</div>
@@ -1207,6 +1253,26 @@
 
 	.section-heading.compact h2 {
 		font-size: clamp(1.45rem, 3vw, 2rem);
+	}
+
+	.range-toggle {
+		flex-shrink: 0;
+		align-self: start;
+		padding: 0;
+		background: none;
+		border: none;
+		color: var(--color-muted-foreground);
+		font-size: 0.85rem;
+		font-weight: 600;
+		text-decoration: underline;
+		text-underline-offset: 3px;
+		cursor: pointer;
+		transition: color 0.15s ease;
+	}
+
+	.range-toggle:hover,
+	.range-toggle.is-active {
+		color: var(--color-primary);
 	}
 
 	.title-row {

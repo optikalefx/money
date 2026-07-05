@@ -231,6 +231,44 @@ export const getMonthlyDynamicBreakdown = query({
 	}
 });
 
+// All-time dynamic spend, aggregated across every resolved line (no month window). Backs the
+// "All Time" toggle on the By category / Top merchants boxes so the user can see totals to hunt
+// for categories/merchants they're overspending on overall. Skipped (never subscribed) until a
+// box is toggled on, since it scans the full history.
+export const getAllTimeDynamicBreakdown = query({
+	args: {},
+	handler: async (ctx) => {
+		const { data, entries } = await resolvedLinesInRange(ctx, { cap: 20000 });
+		const nameFor = (slug: string) => categoryDisplayLabel(data, slug);
+
+		const categoryTotals = new Map<string, number>();
+		const merchantTotals = new Map<string, { total: number; count: number }>();
+
+		for (const { transaction, line } of entries) {
+			if (line.classification !== 'dynamic' || line.kind !== 'expense') continue;
+			if (line.allocatedAmount <= 0) continue;
+			categoryTotals.set(
+				line.categorySlug,
+				(categoryTotals.get(line.categorySlug) ?? 0) + line.allocatedAmount
+			);
+			const label = transaction.merchantName ?? transaction.name;
+			const existing = merchantTotals.get(label) ?? { total: 0, count: 0 };
+			existing.total += line.allocatedAmount;
+			existing.count += 1;
+			merchantTotals.set(label, existing);
+		}
+
+		return {
+			byCategory: [...categoryTotals.entries()]
+				.map(([slug, total]) => ({ slug, name: nameFor(slug), total }))
+				.sort((a, b) => b.total - a.total),
+			byMerchant: [...merchantTotals.entries()]
+				.map(([label, { total, count }]) => ({ label, total, count }))
+				.sort((a, b) => b.total - a.total)
+		};
+	}
+});
+
 // Group resolved lines of one classification into WHERE/WHAT units: item lines (with a sku) group
 // per `(merchant, sku)`; plain lines group per merchant. Reused by the recurring + expected pages.
 function groupLinesByUnit(
