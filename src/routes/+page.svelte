@@ -102,10 +102,12 @@
 		search: searchTerm.trim() || undefined
 	});
 
-	// A rolling 12-month window that always includes the selected month, for the
-	// month-over-month breakdown (server-side, so it isn't limited to the recent-rows cap).
-	const windowStart = $derived(shiftMonth(minMonth(initialMonth, selectedMonth), -11));
-	const windowEnd = $derived(maxMonth(initialMonth, selectedMonth));
+	// A fixed 12-month window ending at the current month, for the month-over-month breakdown
+	// (server-side, so it isn't limited to the recent-rows cap). Anchored on the current month —
+	// never the selected month — so clicking a bar only moves the filter/highlight and never
+	// changes which 12 months the trend shows.
+	const windowEnd = initialMonth;
+	const windowStart = shiftMonth(windowEnd, -11);
 
 	const plaidStatus = useQuery(api.plaid.getConnectionStatus, () => ({}));
 	const transactions = useQuery(api.transactions.listRecentTransactions, () => transactionArgs, {
@@ -226,14 +228,6 @@
 		const [year, monthNum] = month.split('-').map(Number);
 		const index = year * 12 + (monthNum - 1) + delta;
 		return `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, '0')}`;
-	}
-
-	function minMonth(a: string, b: string) {
-		return a < b ? a : b;
-	}
-
-	function maxMonth(a: string, b: string) {
-		return a > b ? a : b;
 	}
 
 	function formatMonthShort(month: string) {
@@ -647,7 +641,7 @@
 						type="button"
 						class="month-cell"
 						class:is-active={entry.month === selectedMonth}
-						title={`${formatMonthLong(entry.month)} · ${formatAmount(entry.total)}`}
+						use:tooltip={`${formatMonthLong(entry.month)} · ${formatAmount(entry.total)}`}
 						onclick={() => (selectedMonth = entry.month)}
 					>
 						<span class="month-bar-track">
@@ -1616,9 +1610,13 @@
 	@media (max-width: 960px) {
 		.hero,
 		.summary-grid,
-		.dashboard-grid,
 		.control-bar {
 			grid-template-columns: 1fr;
+		}
+
+		/* By category / Top merchants stay side by side even on the smallest layout. */
+		.dashboard-grid {
+			gap: 0.75rem;
 		}
 
 		.hero {
@@ -1637,6 +1635,32 @@
 	}
 
 	@media (max-width: 760px) {
+		/* The full dollar amount is wider than a bar's slice of the mobile width, so the
+		   per-bar numbers overlap. Drop them here — the selected month's exact figure is in
+		   the "Dynamic spend" card below and every bar keeps its tooltip. */
+		.month-cell b {
+			display: none;
+		}
+
+		.month-row {
+			gap: 0.15rem;
+			overflow-x: visible;
+		}
+
+		.month-cell {
+			min-width: 0;
+			padding: 0.4rem 0.1rem;
+		}
+
+		.month-bar-fill {
+			width: 0.55rem;
+		}
+
+		.month-label {
+			font-size: 0.62rem;
+			letter-spacing: 0;
+		}
+
 		.table-shell {
 			background: transparent;
 			border: 0;
@@ -1658,30 +1682,59 @@
 			display: none;
 		}
 
+		/* Condensed mobile card: date chip anchors the left and spans both rows,
+		   merchant + amount sit on top, category + actions below. Field labels are
+		   dropped — the layout itself carries the meaning. */
 		tr {
-			margin-bottom: 0.9rem;
-			padding: 1rem;
+			display: grid;
+			grid-template-columns: auto minmax(0, 1fr) auto;
+			grid-template-areas:
+				'date merchant amount'
+				'date category actions';
+			column-gap: 0.7rem;
+			row-gap: 0.6rem;
+			align-items: center;
+			margin-bottom: 0.7rem;
+			padding: 0.75rem 0.85rem;
 			background: rgb(254 254 250 / 90%);
 			border: 1px solid rgb(222 216 207 / 65%);
-			border-radius: 1.4rem 2.2rem 1.5rem 1.9rem;
+			border-radius: 1.2rem 1.8rem 1.3rem 1.6rem;
 			box-shadow: var(--shadow-soft);
 		}
 
 		td {
-			display: grid;
-			grid-template-columns: 6.5rem minmax(0, 1fr);
-			gap: 0.75rem;
-			padding: 0.45rem 0;
+			padding: 0;
 			border-bottom: 0;
 		}
 
 		td::before {
-			color: var(--color-muted-foreground);
-			font-size: 0.72rem;
-			font-weight: 900;
-			letter-spacing: 0.08em;
-			text-transform: uppercase;
-			content: attr(data-label);
+			display: none;
+		}
+
+		td[data-label='Date'] {
+			grid-area: date;
+			align-self: start;
+		}
+
+		td[data-label='Merchant'] {
+			grid-area: merchant;
+			align-self: start;
+		}
+
+		td[data-label='Amount'] {
+			grid-area: amount;
+			align-self: start;
+			font-size: 1.05rem;
+		}
+
+		td[data-label='Category'] {
+			grid-area: category;
+		}
+
+		td[data-label='Actions'] {
+			grid-area: actions;
+			justify-self: end;
+			min-width: 0;
 		}
 	}
 </style>
