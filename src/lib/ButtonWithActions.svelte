@@ -14,6 +14,7 @@
 		variant = 'primary',
 		type = 'button',
 		disabled = false,
+		mainDisabled = false,
 		title,
 		onclick,
 		items,
@@ -23,7 +24,10 @@
 	}: {
 		variant?: 'primary' | 'outline' | 'soft';
 		type?: 'button' | 'submit' | 'reset';
+		/** Disables the whole control (both the primary segment and the ⋯ menu). */
 		disabled?: boolean;
+		/** Disables only the primary segment; the ⋯ menu stays usable. */
+		mainDisabled?: boolean;
 		/** Tooltip for the primary segment. */
 		title?: string;
 		/** Fired when the primary (left) segment is clicked. */
@@ -71,7 +75,7 @@
 </script>
 
 <div class="bwa bwa-{variant} {className}" class:is-disabled={disabled}>
-	<button class="bwa-main" {type} {disabled} {title} {onclick}>
+	<button class="bwa-main" {type} disabled={disabled || mainDisabled} {title} {onclick}>
 		{@render children()}
 	</button>
 	<span class="bwa-divider" aria-hidden="true"></span>
@@ -156,6 +160,12 @@
 		cursor: not-allowed;
 	}
 
+	/* When only the primary segment is disabled (mainDisabled), fade just it — the ⋯ stays live. */
+	.bwa:not(.is-disabled) .bwa-main:disabled {
+		cursor: not-allowed;
+		opacity: 0.58;
+	}
+
 	/* ---- primary: solid green pill ---- */
 	.bwa-primary {
 		box-shadow: var(--shadow-soft);
@@ -177,7 +187,7 @@
 		background: rgb(255 255 255 / 28%);
 	}
 
-	.bwa-primary:not(.is-disabled) .bwa-main:hover {
+	.bwa-primary:not(.is-disabled) .bwa-main:not(:disabled):hover {
 		background: color-mix(in srgb, var(--color-primary) 92%, black);
 	}
 
@@ -207,7 +217,7 @@
 		opacity: 0.4;
 	}
 
-	.bwa-outline:not(.is-disabled) .bwa-main:hover {
+	.bwa-outline:not(.is-disabled) .bwa-main:not(:disabled):hover {
 		color: var(--color-secondary-foreground);
 		background: color-mix(in srgb, var(--color-secondary) 85%, transparent);
 	}
@@ -241,7 +251,7 @@
 		background: rgb(222 216 207 / 90%);
 	}
 
-	.bwa-soft:not(.is-disabled) .bwa-main:hover {
+	.bwa-soft:not(.is-disabled) .bwa-main:not(:disabled):hover {
 		background: rgb(230 220 205 / 78%);
 	}
 

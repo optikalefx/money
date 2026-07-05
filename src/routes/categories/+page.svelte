@@ -8,6 +8,7 @@
 	import Section from '$lib/Section.svelte';
 	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
 	import Button from '$lib/Button.svelte';
+	import Modal from '$lib/Modal.svelte';
 
 	type CategoryTreatment = 'expected' | 'transfer' | null;
 	type CategoryRow = {
@@ -26,6 +27,7 @@
 	const upsertCategory = useMutation(api.categories.upsertCategory);
 	const deleteCategory = useMutation(api.categories.deleteCategory);
 	const setCategoryTreatment = useMutation(api.categories.setCategoryTreatment);
+	const reassignCategory = useMutation(api.categories.reassignCategory);
 	const setAiConfig = useMutation(api.categories.setAiConfig);
 	const categorize = useAction(api.aiActions.categorizeTransactions);
 	const suggestions = useQuery(api.categories.listCategorySuggestions, () => ({}));
@@ -54,6 +56,11 @@
 	let excludedMembers = $state<Record<string, string[]>>({});
 	let statusMessage = $state('');
 	let errorMessage = $state('');
+
+	// Re-assign modal: merge a (usually near-duplicate) category's units into another one.
+	let reassignRow = $state<CategoryRow | null>(null);
+	let reassignTargetSlug = $state('');
+	let isReassigning = $state(false);
 
 	const suggestionRows = $derived((suggestions.data ?? []) as Suggestion[]);
 
@@ -140,6 +147,40 @@
 			statusMessage = `Removed ${row.name}.`;
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unable to delete category.';
+		}
+	}
+
+	function openReassign(row: CategoryRow) {
+		reassignRow = row;
+		reassignTargetSlug = '';
+		errorMessage = '';
+	}
+
+	function closeReassign() {
+		reassignRow = null;
+		reassignTargetSlug = '';
+	}
+
+	// Categories the reassign target dropdown offers: everything except the category being merged
+	// away (and the current draft rows still sort by name from `rows`).
+	const reassignTargets = $derived(
+		reassignRow ? rows.filter((row) => row.id !== reassignRow!.id) : []
+	);
+
+	async function confirmReassign() {
+		if (!reassignRow || !reassignTargetSlug) return;
+		const source = reassignRow;
+		isReassigning = true;
+		errorMessage = '';
+		try {
+			const result = await reassignCategory({ fromId: source.id, toSlug: reassignTargetSlug });
+			const target = rows.find((row) => row.slug === reassignTargetSlug);
+			statusMessage = `Reassigned ${result.moved} item${result.moved === 1 ? '' : 's'} from ${source.name} to ${target?.name ?? reassignTargetSlug} and removed ${source.name}.`;
+			closeReassign();
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to reassign category.';
+		} finally {
+			isReassigning = false;
 		}
 	}
 
@@ -448,7 +489,8 @@
 									{#if row.slug !== 'uncategorized'}
 										<ButtonWithActions
 											variant="outline"
-											disabled={!isDirty(row) || savingId === row.id}
+											disabled={savingId === row.id}
+											mainDisabled={!isDirty(row)}
 											onclick={() => saveRow(row)}
 											items={[
 												{
@@ -459,6 +501,7 @@
 													onSelect: () =>
 														changeTreatment(row, row.treatment === 'expected' ? null : 'expected')
 												},
+												{ label: 'Re-assign category', onSelect: () => openReassign(row) },
 												{ label: 'Delete', destructive: true, onSelect: () => removeCategory(row) }
 											]}
 										>
@@ -484,6 +527,37 @@
 		{/if}
 	</Section>
 </main>
+
+<Modal open={reassignRow !== null} title="Re-assign category" onClose={closeReassign}>
+	{#if reassignRow}
+		<p class="reassign-lede">
+			Move everything currently categorized as <strong>{reassignRow.name}</strong> into another
+			category, then delete <strong>{reassignRow.name}</strong>. The merchants and items that were in
+			it are reassigned — no re-run needed.
+		</p>
+		<label class="reassign-field">
+			<span>Reassign into</span>
+			<select bind:value={reassignTargetSlug}>
+				<option value="" disabled>Choose a category…</option>
+				{#each reassignTargets as target (target.id)}
+					<option value={target.slug}>{target.name}</option>
+				{/each}
+			</select>
+		</label>
+	{/if}
+	{#snippet footer()}
+		<Button variant="outline" onclick={closeReassign}>Cancel</Button>
+		<Button
+			variant="primary"
+			onclick={confirmReassign}
+			disabled={!reassignTargetSlug}
+			loading={isReassigning}
+			loadingLabel="Reassigning..."
+		>
+			Reassign & delete
+		</Button>
+	{/snippet}
+</Modal>
 
 <style>
 	.money-shell {
@@ -787,6 +861,18 @@
 	.empty-state {
 		padding: 2rem;
 		color: var(--color-muted-foreground);
+	}
+
+	.reassign-lede {
+		margin: 0 0 1.1rem;
+		color: var(--color-muted-foreground);
+		font-size: 0.9rem;
+		line-height: 1.5;
+	}
+
+	.reassign-field {
+		display: grid;
+		gap: 0.35rem;
 	}
 
 	@media (max-width: 760px) {

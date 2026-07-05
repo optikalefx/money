@@ -182,6 +182,51 @@ export const deleteCategory = mutation({
 	}
 });
 
+// Merge one category into another: repoint every merchant/item assignment (the per-unit "rules")
+// from the source category's slug to the target's, then delete the now-empty source. Used to fix
+// near-duplicate categories — the units that were in `fromId` are reassigned wholesale to `toSlug`
+// without another AI pass, and the breakdown updates reactively.
+export const reassignCategory = mutation({
+	args: { fromId: v.id('categories'), toSlug: v.string() },
+	handler: async (ctx, args) => {
+		const from = await ctx.db.get(args.fromId);
+		if (!from) throw new Error('Category not found.');
+		if (from.slug === 'uncategorized') {
+			throw new Error('The Uncategorized fallback cannot be reassigned.');
+		}
+		if (from.slug === args.toSlug) {
+			throw new Error('Pick a different category to reassign into.');
+		}
+		const target = await ctx.db
+			.query('categories')
+			.withIndex('by_slug', (q) => q.eq('slug', args.toSlug))
+			.unique();
+		if (!target || !target.active) throw new Error('Target category not found.');
+
+		const now = Date.now();
+		let moved = 0;
+
+		// No index on categorySlug — scan the assignment caches and repoint matches (same bounded
+		// scan `getUncategorizedUnits` uses).
+		const merchantRows = await ctx.db.query('merchantCategories').take(5000);
+		for (const row of merchantRows) {
+			if (row.categorySlug !== from.slug) continue;
+			await ctx.db.patch(row._id, { categorySlug: args.toSlug, updatedAt: now });
+			moved++;
+		}
+
+		const itemRows = await ctx.db.query('itemCategories').take(5000);
+		for (const row of itemRows) {
+			if (row.categorySlug !== from.slug) continue;
+			await ctx.db.patch(row._id, { categorySlug: args.toSlug, updatedAt: now });
+			moved++;
+		}
+
+		await ctx.db.delete(args.fromId);
+		return { ok: true, moved, toSlug: args.toSlug };
+	}
+});
+
 export const getAiConfig = query({
 	args: {},
 	handler: async (ctx) => {
