@@ -786,17 +786,6 @@ export const acceptCategorySuggestion = mutation({
 	}
 });
 
-export const dismissCategorySuggestion = mutation({
-	args: { id: v.id('categorySuggestions') },
-	handler: async (ctx, args) => {
-		const suggestion = await ctx.db.get(args.id);
-		if (suggestion && suggestion.status === 'pending') {
-			await ctx.db.patch(args.id, { status: 'dismissed', updatedAt: Date.now() });
-		}
-		return { ok: true };
-	}
-});
-
 async function uniqueSlug(ctx: MutationCtx, name: string) {
 	const base =
 		name

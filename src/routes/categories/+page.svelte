@@ -8,7 +8,6 @@
 	import Section from '$lib/Section.svelte';
 	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
 	import Button from '$lib/Button.svelte';
-	import { tooltip } from '$lib/tooltip';
 
 	type CategoryTreatment = 'expected' | 'transfer' | null;
 	type CategoryRow = {
@@ -32,7 +31,6 @@
 	const suggestions = useQuery(api.categories.listCategorySuggestions, () => ({}));
 	const suggestCategories = useAction(api.aiActions.suggestCategories);
 	const acceptSuggestion = useMutation(api.categories.acceptCategorySuggestion);
-	const dismissSuggestion = useMutation(api.categories.dismissCategorySuggestion);
 
 	type Suggestion = {
 		id: Id<'categorySuggestions'>;
@@ -48,7 +46,6 @@
 	let drafts = $state<Record<string, { name: string; description: string }>>({});
 	let savingId = $state<string | null>(null);
 	let isCategorizing = $state(false);
-	let forceRun = $state(false);
 	let isSuggesting = $state(false);
 	let suggestionActionId = $state<string | null>(null);
 	let expandedSuggestionId = $state<string | null>(null);
@@ -183,10 +180,6 @@
 		}
 	}
 
-	async function runCategorize() {
-		await categorizeUncategorized(forceRun);
-	}
-
 	async function runSuggest() {
 		isSuggesting = true;
 		errorMessage = '';
@@ -234,20 +227,6 @@
 		// or ones the model punted to "none"), so fire it in the background — the user needn't wait on
 		// it, and the reactive queries update when it lands.
 		categorize({ force: false }).catch(() => {});
-	}
-
-	async function dismissOne(suggestion: Suggestion) {
-		suggestionActionId = suggestion.id;
-		errorMessage = '';
-		try {
-			await dismissSuggestion({ id: suggestion.id });
-			delete excludedMembers[suggestion.id];
-			statusMessage = `Dismissed ${suggestion.name}.`;
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : 'Unable to dismiss suggestion.';
-		} finally {
-			suggestionActionId = null;
-		}
 	}
 </script>
 
@@ -313,10 +292,6 @@
 			</button>
 		</div>
 		<div class="categorize-actions">
-			<label class="force-toggle">
-				<input type="checkbox" bind:checked={forceRun} />
-				<span>Re-run all (ignore cache)</span>
-			</label>
 			<div class="button-row">
 				<Button
 					variant="outline"
@@ -326,16 +301,20 @@
 				>
 					Suggest categories
 				</Button>
-				<span use:tooltip={'Will categorize uncategorized categories'}>
-					<Button
-						variant="primary"
-						onclick={runCategorize}
-						loading={isCategorizing}
-						loadingLabel="Categorizing..."
-					>
-						Categorize transactions
-					</Button>
-				</span>
+				<ButtonWithActions
+					variant="primary"
+					disabled={isCategorizing}
+					title="Will categorize uncategorized transactions"
+					onclick={() => categorizeUncategorized(false)}
+					items={[
+						{
+							label: 'Re-run all (ignore cache)',
+							onSelect: () => categorizeUncategorized(true)
+						}
+					]}
+				>
+					{isCategorizing ? 'Categorizing...' : 'Categorize transactions'}
+				</ButtonWithActions>
 			</div>
 		</div>
 	</section>
@@ -384,14 +363,6 @@
 								{#if excludedCount}
 									<span class="excluded-note">{excludedCount} excluded</span>
 								{/if}
-								<button
-									type="button"
-									class="text-action"
-									disabled={suggestionActionId === suggestion.id}
-									onclick={() => dismissOne(suggestion)}
-								>
-									Dismiss
-								</button>
 							</div>
 						</div>
 						{#if isExpanded}
@@ -587,22 +558,6 @@
 		flex-direction: column;
 		gap: 0.6rem;
 		align-items: end;
-	}
-
-	.force-toggle {
-		display: flex;
-		flex-direction: row;
-		gap: 0.45rem;
-		align-items: center;
-		color: var(--color-muted-foreground);
-		font-size: 0.82rem;
-		font-weight: 800;
-	}
-
-	.force-toggle input {
-		width: auto;
-		min-height: 0;
-		margin: 0;
 	}
 
 	.button-row {
