@@ -20,7 +20,11 @@ const orderItemValidator = v.object({
 
 // Amount tolerance ($) and date window (days) used to match a parsed order to a Plaid charge.
 const MATCH_AMOUNT_TOLERANCE = 0.01;
-const MATCH_DATE_WINDOW_DAYS = 5;
+// Retailers charge when an order *ships*, typically several days after the confirmation email — and
+// always on/after the order date, never before. So search a wide window forward and only a small
+// margin backward (for authorize-vs-email timing and time zones).
+const MATCH_DAYS_BEFORE = 3;
+const MATCH_DAYS_AFTER = 14;
 
 export const getConnectionStatus = query({
 	args: {},
@@ -205,38 +209,62 @@ export const markGmailError = internalMutation({
 // One-shot maintenance: re-bind every order to an owning transaction. Unlike the sync-time
 // `rebindUnmatchedOrders` (which only upgrades to a newly-arrived real charge), this also stands up
 // a synthetic charge for orders imported before standalone binding existed. Safe to re-run.
-export async function reconcileOrders(ctx: MutationCtx) {
-	const matchersByMerchant = new Map(
-		RETAILER_ADAPTERS.map((adapter) => [adapter.merchant, adapter.merchantMatchers])
+const retailerMatchers = () =>
+	new Map(RETAILER_ADAPTERS.map((adapter) => [adapter.merchant, adapter.merchantMatchers]));
+
+// Re-resolve one order's binding (real charge > synthetic > unbound) and persist it. Returns 1 if it
+// ended up bound to some transaction, else 0.
+async function reconcileOneOrder(
+	ctx: MutationCtx,
+	order: Doc<'orders'>,
+	matchersByMerchant: Map<string, string[]>
+): Promise<number> {
+	const matchers = matchersByMerchant.get(order.merchant) ?? [order.merchant];
+	const binding = await resolveOrderBinding(
+		ctx,
+		{
+			total: order.total,
+			orderDate: order.orderDate,
+			merchant: order.merchant,
+			currentMatchedTransactionId: order.matchedTransactionId
+		},
+		matchers
 	);
+	await ctx.db.patch(order._id, {
+		matchedTransactionId: binding.matchedTransactionId,
+		reviewState: binding.reviewState,
+		matchConfidence: binding.matchConfidence,
+		updatedAt: Date.now()
+	});
+	return binding.matchedTransactionId ? 1 : 0;
+}
+
+export async function reconcileOrders(ctx: MutationCtx) {
+	const matchersByMerchant = retailerMatchers();
 	const orders = await ctx.db.query('orders').take(4000);
 	let bound = 0;
-	for (const order of orders) {
-		const matchers = matchersByMerchant.get(order.merchant) ?? [order.merchant];
-		const binding = await resolveOrderBinding(
-			ctx,
-			{
-				total: order.total,
-				orderDate: order.orderDate,
-				merchant: order.merchant,
-				currentMatchedTransactionId: order.matchedTransactionId
-			},
-			matchers
-		);
-		await ctx.db.patch(order._id, {
-			matchedTransactionId: binding.matchedTransactionId,
-			reviewState: binding.reviewState,
-			matchConfidence: binding.matchConfidence,
-			updatedAt: Date.now()
-		});
-		if (binding.matchedTransactionId) bound += 1;
-	}
+	for (const order of orders) bound += await reconcileOneOrder(ctx, order, matchersByMerchant);
 	return { scanned: orders.length, bound };
 }
 
 export const reconcileOrderBindings = internalMutation({
 	args: {},
 	handler: async (ctx) => reconcileOrders(ctx)
+});
+
+// Paginated variant so a full re-match (every order re-scanned against the wide date window) stays
+// within a single mutation's read limit. The `rematchOrders` action drives it batch by batch.
+export const reconcileOrderBatch = internalMutation({
+	args: { cursor: v.union(v.string(), v.null()) },
+	handler: async (ctx, args) => {
+		const matchersByMerchant = retailerMatchers();
+		const page = await ctx.db.query('orders').paginate({ numItems: 50, cursor: args.cursor });
+		let bound = 0;
+		for (const order of page.page) {
+			bound += await reconcileOneOrder(ctx, order, matchersByMerchant);
+		}
+		return { scanned: page.page.length, bound, cursor: page.continueCursor, isDone: page.isDone };
+	}
 });
 
 export const upsertOrder = internalMutation({
@@ -349,8 +377,8 @@ async function findTransactionMatch(
 		return { reviewState: 'unmatched' };
 	}
 
-	const start = shiftDate(orderDate, -MATCH_DATE_WINDOW_DAYS);
-	const end = shiftDate(orderDate, MATCH_DATE_WINDOW_DAYS);
+	const start = shiftDate(orderDate, -MATCH_DAYS_BEFORE);
+	const end = shiftDate(orderDate, MATCH_DAYS_AFTER);
 	const candidates = await ctx.db
 		.query('transactions')
 		.withIndex('by_date', (q) => q.gte('date', start).lte('date', end))
@@ -366,7 +394,13 @@ async function findTransactionMatch(
 			continue;
 		}
 		if (Math.abs(transaction.amount - total) > MATCH_AMOUNT_TOLERANCE) continue;
-		const distance = Math.abs(dateDiffDays(transaction.date, orderDate));
+		// Rank by the charge date closest to the order email, preferring `authorizedDate` (when the
+		// card was authorized, ~order time) over the posted `date` (which lags by the ship delay).
+		const postedDistance = Math.abs(dateDiffDays(transaction.date, orderDate));
+		const authDistance = transaction.authorizedDate
+			? Math.abs(dateDiffDays(transaction.authorizedDate, orderDate))
+			: postedDistance;
+		const distance = Math.min(postedDistance, authDistance);
 		if (!best || distance < best.distance) {
 			best = { id: transaction._id, distance };
 		}
@@ -376,8 +410,8 @@ async function findTransactionMatch(
 		return { reviewState: 'unmatched' };
 	}
 
-	// Same-day amount match is high confidence; farther out is worth a manual look.
-	const confidence = best.distance <= 1 ? 0.95 : 0.7;
+	// Close in time = high confidence (auto-matched); farther out is worth a manual look.
+	const confidence = best.distance <= 2 ? 0.95 : 0.7;
 	return {
 		transactionId: best.id,
 		confidence,

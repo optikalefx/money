@@ -4,7 +4,6 @@
 	import type { Id } from '../convex/_generated/dataModel.js';
 	import { tooltip, truncateWords } from '$lib/tooltip';
 	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
-	import Button from '$lib/Button.svelte';
 	import DateChip from '$lib/DateChip.svelte';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic';
@@ -68,6 +67,7 @@
 	let isSyncing = $state(false);
 	let isConnectingGmail = $state(false);
 	let isSyncingGmail = $state(false);
+	let isRematching = $state(false);
 	// Key of the line-item row whose mutation is in flight (`txnId:sku`), so only its controls
 	// disable — a merchant with several items stays independently actionable.
 	let markingRowKey = $state<string | null>(null);
@@ -135,6 +135,7 @@
 	const removeSupersededItems = useAction(api.plaidActions.removeSupersededItems);
 	const getGmailAuthUrl = useAction(api.gmailActions.getGmailAuthUrl);
 	const syncGmailAction = useAction(api.gmailActions.syncGmail);
+	const rematchOrdersAction = useAction(api.gmailActions.rematchOrders);
 	const markTransactionMutation = useMutation(api.transactions.markTransaction);
 	const markLineItemMutation = useMutation(api.transactions.markLineItem);
 	const markCategoryExpectedMutation = useMutation(api.transactions.markCategoryExpected);
@@ -463,6 +464,20 @@
 		}
 	}
 
+	async function rematchGmailOrders() {
+		isRematching = true;
+		errorMessage = '';
+
+		try {
+			const result = await rematchOrdersAction({});
+			statusMessage = `Re-match complete: ${result.matched} of ${result.scanned} orders bound to a bank charge.`;
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'Unable to re-match orders.';
+		} finally {
+			isRematching = false;
+		}
+	}
+
 	// Mark the merchant (WHERE) of the row's charge as expected/recurring.
 	async function markMerchant(row: LineRow, classification: MerchantMark) {
 		markingRowKey = rowKey(row);
@@ -639,15 +654,25 @@
 							? 'Reconnect Gmail'
 							: 'Connect Gmail'}
 				</button>
-				<Button
-					variant="outline"
-					onclick={syncGmail}
-					loading={isSyncingGmail}
-					loadingLabel="Syncing..."
-					disabled={!gmailStatus.data?.connected}
-				>
-					Sync orders
-				</Button>
+				{#if gmailStatus.data?.connected}
+					<ButtonWithActions
+						variant="outline"
+						disabled={isSyncingGmail || isRematching}
+						onclick={syncGmail}
+						title="Import new Amazon orders from Gmail"
+						menuLabel="More order actions"
+						items={[
+							{
+								label: 'Re-match orders to charges',
+								onSelect: rematchGmailOrders
+							}
+						]}
+					>
+						{isSyncingGmail ? 'Syncing...' : isRematching ? 'Re-matching...' : 'Sync orders'}
+					</ButtonWithActions>
+				{:else}
+					<button class="button button-outline" type="button" disabled> Sync orders </button>
+				{/if}
 			</div>
 
 			{#if statusMessage}

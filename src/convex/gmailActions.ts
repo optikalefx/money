@@ -163,6 +163,28 @@ export const syncGmail = action({
 	}
 });
 
+// Re-run order↔charge matching across every imported order using the current (wide) matcher. Use
+// after tuning the matcher, or to reconcile history: it upgrades orders sitting on a synthetic charge
+// to their real Plaid charge (deleting the synthetic, collapsing duplicates) and itemizes charges
+// that gain a match. Batched to stay within per-mutation limits; safe to re-run.
+export const rematchOrders = action({
+	args: {},
+	handler: async (ctx): Promise<{ scanned: number; matched: number }> => {
+		let cursor: string | null = null;
+		let scanned = 0;
+		let matched = 0;
+		for (;;) {
+			const res: { scanned: number; bound: number; cursor: string; isDone: boolean } =
+				await ctx.runMutation(internal.gmail.reconcileOrderBatch, { cursor });
+			scanned += res.scanned;
+			matched += res.bound;
+			if (res.isDone) break;
+			cursor = res.cursor;
+		}
+		return { scanned, matched };
+	}
+});
+
 async function refreshAccessToken(
 	ctx: ActionCtx,
 	accountId: Id<'gmailAccounts'>,
