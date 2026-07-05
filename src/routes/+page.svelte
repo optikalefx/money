@@ -123,6 +123,7 @@
 	const createLinkToken = useAction(api.plaidActions.createLinkToken);
 	const exchangePublicToken = useAction(api.plaidActions.exchangePublicToken);
 	const syncAllItems = useAction(api.plaidActions.syncAllItems);
+	const removeSupersededItems = useAction(api.plaidActions.removeSupersededItems);
 	const getGmailAuthUrl = useAction(api.gmailActions.getGmailAuthUrl);
 	const syncGmailAction = useAction(api.gmailActions.syncGmail);
 	const markTransactionMutation = useMutation(api.transactions.markTransaction);
@@ -351,9 +352,9 @@
 		});
 	}
 
-	async function connectPlaid() {
+	async function connectPlaid(reconnect = false) {
 		isConnecting = true;
-		statusMessage = 'Preparing Plaid Link...';
+		statusMessage = reconnect ? 'Preparing to reconnect...' : 'Preparing Plaid Link...';
 		errorMessage = '';
 
 		try {
@@ -369,11 +370,17 @@
 				token: token.linkToken,
 				onSuccess: async (publicToken, metadata) => {
 					statusMessage = 'Saving Plaid connection...';
-					await exchangePublicToken({
+					const { plaidItemId } = await exchangePublicToken({
 						publicToken,
 						institutionId: metadata.institution?.institution_id,
 						institutionName: metadata.institution?.name
 					});
+					// Only tear down the previous connection once the new link has succeeded, so a
+					// cancelled Link never leaves you with nothing.
+					if (reconnect) {
+						statusMessage = 'Removing the previous connection...';
+						await removeSupersededItems({ keepPlaidItemId: plaidItemId });
+					}
 					statusMessage = 'Plaid connected. Syncing transactions...';
 					await runSync();
 				},
@@ -555,19 +562,32 @@
 				<button
 					class="button button-primary"
 					type="button"
-					onclick={connectPlaid}
+					onclick={() => connectPlaid()}
 					disabled={isConnecting}
 				>
 					{isConnecting ? 'Connecting...' : 'Connect Account'}
 				</button>
-				<button
-					class="button button-outline"
-					type="button"
-					onclick={runSync}
-					disabled={isSyncing || !plaidStatus.data?.connected}
-				>
-					{isSyncing ? 'Syncing...' : 'Sync now'}
-				</button>
+				{#if plaidStatus.data?.connected}
+					<ButtonWithActions
+						variant="outline"
+						disabled={isSyncing || isConnecting}
+						onclick={runSync}
+						title="Pull the latest transactions"
+						menuLabel="More Plaid actions"
+						items={[
+							{
+								label: 'Reconnect (refresh history)',
+								onSelect: () => connectPlaid(true)
+							}
+						]}
+					>
+						{isSyncing ? 'Syncing...' : isConnecting ? 'Reconnecting...' : 'Sync now'}
+					</ButtonWithActions>
+				{:else}
+					<button class="button button-outline" type="button" onclick={runSync} disabled>
+						Sync now
+					</button>
+				{/if}
 			</div>
 
 			<div class="panel-divider"></div>
@@ -1051,6 +1071,25 @@
 		min-width: 0;
 		min-height: clamp(2.25rem, 9cqi, 3rem);
 		padding: 0.75rem clamp(0.8rem, 4cqi, 2rem);
+		font-size: clamp(0.78rem, 3.2cqi, 1rem);
+		white-space: nowrap;
+	}
+
+	/* ButtonWithActions renders `.bwa`, not `.button`, so it misses the responsive sizing above.
+	   Mirror it here so the split button scales with — and matches the height of — the plain
+	   buttons in this row. The `- 4px` cancels the outline variant's 2px top+bottom wrapper border
+	   so its total height equals a `.button` (whose border sits inside its border-box height). */
+	.button-row :global(.bwa) {
+		min-width: 0;
+	}
+
+	.button-row :global(.bwa-main),
+	.button-row :global(.bwa-more) {
+		min-height: calc(clamp(2.25rem, 9cqi, 3rem) - 4px);
+	}
+
+	.button-row :global(.bwa-main) {
+		padding-inline: clamp(0.8rem, 4cqi, 1.5rem);
 		font-size: clamp(0.78rem, 3.2cqi, 1rem);
 		white-space: nowrap;
 	}

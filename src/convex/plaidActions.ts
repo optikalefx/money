@@ -195,6 +195,36 @@ async function runSyncAll(ctx: ActionCtx) {
 	return results;
 }
 
+// Reconnect teardown: called after a fresh link succeeds. Removes every superseded item at Plaid
+// (stops billing / invalidates the token) and purges its local data, so the new 12-month item is the
+// only connection. Best-effort on the Plaid side — local purge runs regardless.
+export const removeSupersededItems = action({
+	args: { keepPlaidItemId: v.id('plaidItems') },
+	handler: async (ctx, args): Promise<{ removed: number }> => {
+		const items: Array<{ _id: Id<'plaidItems'>; accessToken: string }> = await ctx.runQuery(
+			internal.plaid.listItemsToPurge,
+			{ keepPlaidItemId: args.keepPlaidItemId }
+		);
+		const client = plaidClient();
+		for (const item of items) {
+			try {
+				await client.itemRemove({ access_token: item.accessToken });
+			} catch {
+				// Even if Plaid rejects the removal, purge the local copy so old charges can't linger
+				// and double-count against the reconnected item.
+			}
+			let done = false;
+			while (!done) {
+				const result: { done: boolean } = await ctx.runMutation(internal.plaid.purgePlaidItem, {
+					plaidItemId: item._id
+				});
+				done = result.done;
+			}
+		}
+		return { removed: items.length };
+	}
+});
+
 async function syncItem(
 	ctx: ActionCtx,
 	item: { _id: Id<'plaidItems'>; accessToken: string; cursor?: string }

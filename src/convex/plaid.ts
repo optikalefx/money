@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { internalMutation, internalQuery, type MutationCtx } from './_generated/server';
 import { authedQuery as query } from './authed';
 import type { Id } from './_generated/dataModel';
-import { rebindUnmatchedOrders } from './gmail';
+import { rebindUnmatchedOrders, reconcileOrders } from './gmail';
 
 // Plaid connector + sync internals. Source-agnostic transaction review/reporting (which reads the
 // `transactions` table across every source) lives in `transactions.ts`.
@@ -251,6 +251,55 @@ export const applyTransactionSync = internalMutation({
 		// Newly arrived charges may reconcile an order we'd stood up on its own synthetic charge;
 		// re-bind those so a real Plaid charge always supersedes the synthetic (never double-count).
 		await rebindUnmatchedOrders(ctx);
+	}
+});
+
+// Items to tear down during a reconnect — every connected item except the freshly linked one.
+export const listItemsToPurge = internalQuery({
+	args: { keepPlaidItemId: v.id('plaidItems') },
+	handler: async (ctx, args) => {
+		const items = await ctx.db.query('plaidItems').take(50);
+		return items
+			.filter((item) => item._id !== args.keepPlaidItemId)
+			.map((item) => ({ _id: item._id, accessToken: item.accessToken }));
+	}
+});
+
+// Delete a superseded item and everything it owns. Transactions are removed in bounded batches
+// (the caller loops until `done`) to stay within a mutation's write limit; the final batch drops the
+// accounts + item and re-homes any orders that were bound to the now-deleted charges (they fall back
+// to a synthetic charge until the reconnect sync re-binds them to the newly imported real charges).
+const PURGE_BATCH = 256;
+
+export const purgePlaidItem = internalMutation({
+	args: { plaidItemId: v.id('plaidItems') },
+	handler: async (ctx, args) => {
+		const item = await ctx.db.get(args.plaidItemId);
+		if (!item) return { done: true };
+
+		const accounts = await ctx.db
+			.query('accounts')
+			.withIndex('by_plaidItemId', (q) => q.eq('plaidItemId', args.plaidItemId))
+			.take(50);
+
+		let deleted = 0;
+		for (const account of accounts) {
+			if (deleted >= PURGE_BATCH) break;
+			const txns = await ctx.db
+				.query('transactions')
+				.withIndex('by_accountId_and_date', (q) => q.eq('accountId', account._id))
+				.take(PURGE_BATCH - deleted);
+			for (const txn of txns) {
+				await ctx.db.delete(txn._id);
+				deleted += 1;
+			}
+		}
+		if (deleted >= PURGE_BATCH) return { done: false };
+
+		for (const account of accounts) await ctx.db.delete(account._id);
+		await ctx.db.delete(args.plaidItemId);
+		await reconcileOrders(ctx);
+		return { done: true };
 	}
 });
 

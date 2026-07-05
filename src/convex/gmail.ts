@@ -205,36 +205,38 @@ export const markGmailError = internalMutation({
 // One-shot maintenance: re-bind every order to an owning transaction. Unlike the sync-time
 // `rebindUnmatchedOrders` (which only upgrades to a newly-arrived real charge), this also stands up
 // a synthetic charge for orders imported before standalone binding existed. Safe to re-run.
+export async function reconcileOrders(ctx: MutationCtx) {
+	const matchersByMerchant = new Map(
+		RETAILER_ADAPTERS.map((adapter) => [adapter.merchant, adapter.merchantMatchers])
+	);
+	const orders = await ctx.db.query('orders').take(4000);
+	let bound = 0;
+	for (const order of orders) {
+		const matchers = matchersByMerchant.get(order.merchant) ?? [order.merchant];
+		const binding = await resolveOrderBinding(
+			ctx,
+			{
+				total: order.total,
+				orderDate: order.orderDate,
+				merchant: order.merchant,
+				currentMatchedTransactionId: order.matchedTransactionId
+			},
+			matchers
+		);
+		await ctx.db.patch(order._id, {
+			matchedTransactionId: binding.matchedTransactionId,
+			reviewState: binding.reviewState,
+			matchConfidence: binding.matchConfidence,
+			updatedAt: Date.now()
+		});
+		if (binding.matchedTransactionId) bound += 1;
+	}
+	return { scanned: orders.length, bound };
+}
+
 export const reconcileOrderBindings = internalMutation({
 	args: {},
-	handler: async (ctx) => {
-		const matchersByMerchant = new Map(
-			RETAILER_ADAPTERS.map((adapter) => [adapter.merchant, adapter.merchantMatchers])
-		);
-		const orders = await ctx.db.query('orders').take(4000);
-		let bound = 0;
-		for (const order of orders) {
-			const matchers = matchersByMerchant.get(order.merchant) ?? [order.merchant];
-			const binding = await resolveOrderBinding(
-				ctx,
-				{
-					total: order.total,
-					orderDate: order.orderDate,
-					merchant: order.merchant,
-					currentMatchedTransactionId: order.matchedTransactionId
-				},
-				matchers
-			);
-			await ctx.db.patch(order._id, {
-				matchedTransactionId: binding.matchedTransactionId,
-				reviewState: binding.reviewState,
-				matchConfidence: binding.matchConfidence,
-				updatedAt: Date.now()
-			});
-			if (binding.matchedTransactionId) bound += 1;
-		}
-		return { scanned: orders.length, bound };
-	}
+	handler: async (ctx) => reconcileOrders(ctx)
 });
 
 export const upsertOrder = internalMutation({
