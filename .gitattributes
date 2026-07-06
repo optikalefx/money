@@ -1,0 +1,13 @@
+# Always treat source files as text so a stray control byte (e.g. a NUL) can't make git
+# misclassify a file as binary and hide its diff. `text` normalizes line endings to LF on
+# commit; `diff` forces git to render a textual diff even if it heuristically looks binary.
+*.ts     text diff
+*.tsx    text diff
+*.js     text diff
+*.mjs    text diff
+*.cjs    text diff
+*.svelte text diff
+*.json   text diff
+*.css    text diff
+*.html   text diff
+*.md     text diff

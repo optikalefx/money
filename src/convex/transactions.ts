@@ -53,7 +53,7 @@ export const listRecentTransactions = query({
 			startDate: args.startDate,
 			endDate: args.endDate
 		});
-		const data = await loadResolutionData(ctx);
+		const data = await loadResolutionData(ctx, rows);
 		const resolved = rows.map((transaction) => ({
 			transaction,
 			lineItems: resolveTransactionLineItems(transaction, data)
@@ -150,7 +150,7 @@ async function resolvedLinesInRange(
 		})
 		.order('desc')
 		.take(opts.cap ?? 2000);
-	const data = await loadResolutionData(ctx);
+	const data = await loadResolutionData(ctx, rows);
 	const entries: Array<{ transaction: Doc<'transactions'>; line: ResolvedLineItem }> = [];
 	for (const transaction of rows) {
 		if (transaction.removed) continue;
