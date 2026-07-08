@@ -16,6 +16,7 @@ import type * as aiModels from "../aiModels.js";
 import type * as authNode from "../authNode.js";
 import type * as authed from "../authed.js";
 import type * as categories from "../categories.js";
+import type * as crons from "../crons.js";
 import type * as gmail from "../gmail.js";
 import type * as gmailActions from "../gmailActions.js";
 import type * as http from "../http.js";
@@ -24,6 +25,7 @@ import type * as plaidActions from "../plaidActions.js";
 import type * as reset from "../reset.js";
 import type * as resolution from "../resolution.js";
 import type * as session from "../session.js";
+import type * as syncRuns from "../syncRuns.js";
 import type * as transactions from "../transactions.js";
 
 import type {
@@ -41,6 +43,7 @@ declare const fullApi: ApiFromModules<{
   authNode: typeof authNode;
   authed: typeof authed;
   categories: typeof categories;
+  crons: typeof crons;
   gmail: typeof gmail;
   gmailActions: typeof gmailActions;
   http: typeof http;
@@ -49,6 +52,7 @@ declare const fullApi: ApiFromModules<{
   reset: typeof reset;
   resolution: typeof resolution;
   session: typeof session;
+  syncRuns: typeof syncRuns;
   transactions: typeof transactions;
 }>;
 

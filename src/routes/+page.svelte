@@ -5,6 +5,7 @@
 	import { tooltip, truncateWords } from '$lib/tooltip';
 	import ButtonWithActions from '$lib/ButtonWithActions.svelte';
 	import DateChip from '$lib/DateChip.svelte';
+	import SyncHistoryModal from '$lib/SyncHistoryModal.svelte';
 
 	type Classification = 'known_recurring' | 'expected' | 'dynamic';
 	type MerchantClassification = 'known_recurring' | 'expected';
@@ -129,6 +130,7 @@
 	);
 	const categoriesQuery = useQuery(api.categories.listCategories, () => ({}));
 	const gmailStatus = useQuery(api.gmail.getConnectionStatus, () => ({}));
+	let syncHistoryOpen = $state(false);
 	const createLinkToken = useAction(api.plaidActions.createLinkToken);
 	const exchangePublicToken = useAction(api.plaidActions.exchangePublicToken);
 	const syncAllItems = useAction(api.plaidActions.syncAllItems);
@@ -580,15 +582,20 @@
 		</div>
 
 		<div class="connection-panel organic-surface">
-			<div>
-				<span class="panel-label">Plaid</span>
-				{#if plaidStatus.isLoading}
-					<strong>Checking connection...</strong>
-				{:else if plaidStatus.data?.connected}
-					<strong>Connected</strong>
-				{:else}
-					<strong>Not connected</strong>
-				{/if}
+			<div class="panel-head">
+				<div>
+					<span class="panel-label">Plaid</span>
+					{#if plaidStatus.isLoading}
+						<strong>Checking connection...</strong>
+					{:else if plaidStatus.data?.connected}
+						<strong>Connected</strong>
+					{:else}
+						<strong>Not connected</strong>
+					{/if}
+				</div>
+				<button type="button" class="range-toggle" onclick={() => (syncHistoryOpen = true)}>
+					Sync history
+				</button>
 			</div>
 
 			<div class="button-row">
@@ -683,6 +690,8 @@
 			{/if}
 		</div>
 	</section>
+
+	<SyncHistoryModal open={syncHistoryOpen} onClose={() => (syncHistoryOpen = false)} />
 
 	<section class="trend-section organic-surface" aria-label="Dynamic spending month over month">
 		<div class="section-heading compact">
@@ -1202,6 +1211,13 @@
 
 	.error-note {
 		color: var(--color-destructive);
+	}
+
+	.panel-head {
+		display: flex;
+		gap: 1rem;
+		align-items: start;
+		justify-content: space-between;
 	}
 
 	.control-bar {

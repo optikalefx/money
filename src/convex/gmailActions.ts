@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { env, type ActionCtx } from './_generated/server';
+import { env, internalAction, type ActionCtx } from './_generated/server';
 import { authedAction as action } from './authed';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
@@ -47,6 +47,7 @@ function requireGoogleConfig() {
 
 export const getGmailAuthUrl = action({
 	args: { returnTo: v.optional(v.string()) },
+	returns: v.object({ url: v.string() }),
 	handler: async (ctx, args): Promise<{ url: string }> => {
 		const { clientId, redirectUri } = requireGoogleConfig();
 		const state: string = await ctx.runMutation(internal.gmail.createOAuthState, {
@@ -68,100 +69,135 @@ export const getGmailAuthUrl = action({
 	}
 });
 
+type GmailAccountForSync = {
+	_id: Id<'gmailAccounts'>;
+	refreshToken: string;
+	lastMessageEpochMs?: number;
+};
+
 export const syncGmail = action({
 	args: {},
-	handler: async (ctx) => {
-		const account: {
-			_id: Id<'gmailAccounts'>;
-			refreshToken: string;
-			lastMessageEpochMs?: number;
-		} | null = await ctx.runQuery(internal.gmail.getGmailAccount, {});
+	returns: v.object({ scanned: v.number(), imported: v.number() }),
+	handler: async (ctx): Promise<{ scanned: number; imported: number }> => {
+		const account: GmailAccountForSync | null = await ctx.runQuery(
+			internal.gmail.getGmailAccount,
+			{}
+		);
 
 		if (!account) {
 			throw new Error('Gmail is not connected.');
 		}
 
-		const syncRunId: Id<'syncRuns'> = await ctx.runMutation(internal.plaid.startSyncRun, {
-			source: 'gmail'
-		});
-
-		try {
-			const accessToken = await refreshAccessToken(ctx, account._id, account.refreshToken);
-
-			let added = 0;
-			let scanned = 0;
-			let maxEpoch = account.lastMessageEpochMs ?? 0;
-
-			// Run each retailer adapter over its own Gmail search, importing store-agnostic orders.
-			for (const adapter of RETAILER_ADAPTERS) {
-				const messageIds = await listMessageIds(accessToken, adapter.gmailQuery());
-				scanned += messageIds.length;
-
-				for (const messageId of messageIds) {
-					const message = await getMessage(accessToken, messageId);
-					const epoch = Number(message.internalDate ?? 0);
-					if (account.lastMessageEpochMs && epoch <= account.lastMessageEpochMs) continue;
-					if (epoch > maxEpoch) maxEpoch = epoch;
-
-					// A single email can bundle multiple orders, each its own card charge.
-					const orderDate = epoch > 0 ? new Date(epoch).toISOString().slice(0, 10) : undefined;
-					for (const order of adapter.parseOrders(message)) {
-						await ctx.runMutation(internal.gmail.upsertOrder, {
-							source: 'gmail',
-							merchant: adapter.merchant,
-							sourceMessageId: message.id,
-							orderId: order.orderId,
-							orderDate,
-							total: order.total,
-							isoCurrencyCode: 'USD',
-							items: order.items.map((item) => ({
-								title: displayTitle(item.title, item.sku),
-								quantity: item.quantity,
-								amount: item.amount,
-								sku: item.sku
-							})),
-							merchantMatchers: adapter.merchantMatchers,
-							raw: { snippet: message.snippet, orderId: order.orderId }
-						});
-						added += 1;
-					}
-				}
-			}
-
-			await ctx.runMutation(internal.gmail.finishGmailSync, {
-				accountId: account._id,
-				lastMessageEpochMs: maxEpoch > 0 ? maxEpoch : undefined
-			});
-			await ctx.runMutation(internal.plaid.finishSyncRun, {
-				syncRunId,
-				status: 'success',
-				added
-			});
-
-			// Newly imported order items land in Uncategorized until the AI categorizer runs. Chain it
-			// (same as the Plaid sync) so a Gmail import always categorizes new items — it only calls
-			// the model for `(merchant, sku)` pairs not already cached, so a no-op import is cheap.
-			if (added > 0) {
-				await ctx.scheduler.runAfter(0, internal.aiActions.categorizeTransactionsInternal, {});
-			}
-
-			return { scanned, imported: added };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : 'Unknown Gmail sync error';
-			await ctx.runMutation(internal.gmail.markGmailError, {
-				accountId: account._id,
-				status: 'error',
-				errorMessage: message
-			});
-			await ctx.runMutation(internal.plaid.finishSyncRun, {
-				syncRunId,
-				status: 'error',
-				errorMessage: message
-			});
-			throw error;
-		}
+		return runGmailSync(ctx, account);
 	}
 });
+
+// Same sync, invoked by the daily cron (which runs with no user identity, so it can't go through
+// the auth-guarded public action above). A missing account is a quiet no-op instead of an error:
+// the cron shouldn't fail forever just because Gmail was never connected. Every real attempt —
+// success or failure — is recorded in `syncRuns` by runGmailSync.
+export const syncGmailInternal = internalAction({
+	args: {},
+	returns: v.union(v.object({ scanned: v.number(), imported: v.number() }), v.null()),
+	handler: async (ctx): Promise<{ scanned: number; imported: number } | null> => {
+		const account: GmailAccountForSync | null = await ctx.runQuery(
+			internal.gmail.getGmailAccount,
+			{}
+		);
+
+		if (!account) {
+			console.log('Gmail sync skipped: no connected account.');
+			return null;
+		}
+
+		return runGmailSync(ctx, account);
+	}
+});
+
+async function runGmailSync(
+	ctx: ActionCtx,
+	account: GmailAccountForSync
+): Promise<{ scanned: number; imported: number }> {
+	const syncRunId: Id<'syncRuns'> = await ctx.runMutation(internal.plaid.startSyncRun, {
+		source: 'gmail'
+	});
+
+	try {
+		const accessToken = await refreshAccessToken(ctx, account._id, account.refreshToken);
+
+		let added = 0;
+		let scanned = 0;
+		let maxEpoch = account.lastMessageEpochMs ?? 0;
+
+		// Run each retailer adapter over its own Gmail search, importing store-agnostic orders.
+		for (const adapter of RETAILER_ADAPTERS) {
+			const messageIds = await listMessageIds(accessToken, adapter.gmailQuery());
+			scanned += messageIds.length;
+
+			for (const messageId of messageIds) {
+				const message = await getMessage(accessToken, messageId);
+				const epoch = Number(message.internalDate ?? 0);
+				if (account.lastMessageEpochMs && epoch <= account.lastMessageEpochMs) continue;
+				if (epoch > maxEpoch) maxEpoch = epoch;
+
+				// A single email can bundle multiple orders, each its own card charge.
+				const orderDate = epoch > 0 ? new Date(epoch).toISOString().slice(0, 10) : undefined;
+				for (const order of adapter.parseOrders(message)) {
+					await ctx.runMutation(internal.gmail.upsertOrder, {
+						source: 'gmail',
+						merchant: adapter.merchant,
+						sourceMessageId: message.id,
+						orderId: order.orderId,
+						orderDate,
+						total: order.total,
+						isoCurrencyCode: 'USD',
+						items: order.items.map((item) => ({
+							title: displayTitle(item.title, item.sku),
+							quantity: item.quantity,
+							amount: item.amount,
+							sku: item.sku
+						})),
+						merchantMatchers: adapter.merchantMatchers,
+						raw: { snippet: message.snippet, orderId: order.orderId }
+					});
+					added += 1;
+				}
+			}
+		}
+
+		await ctx.runMutation(internal.gmail.finishGmailSync, {
+			accountId: account._id,
+			lastMessageEpochMs: maxEpoch > 0 ? maxEpoch : undefined
+		});
+		await ctx.runMutation(internal.plaid.finishSyncRun, {
+			syncRunId,
+			status: 'success',
+			added
+		});
+
+		// Newly imported order items land in Uncategorized until the AI categorizer runs. Chain it
+		// (same as the Plaid sync) so a Gmail import always categorizes new items — it only calls
+		// the model for `(merchant, sku)` pairs not already cached, so a no-op import is cheap.
+		if (added > 0) {
+			await ctx.scheduler.runAfter(0, internal.aiActions.categorizeTransactionsInternal, {});
+		}
+
+		return { scanned, imported: added };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : 'Unknown Gmail sync error';
+		await ctx.runMutation(internal.gmail.markGmailError, {
+			accountId: account._id,
+			status: 'error',
+			errorMessage: message
+		});
+		await ctx.runMutation(internal.plaid.finishSyncRun, {
+			syncRunId,
+			status: 'error',
+			errorMessage: message
+		});
+		throw error;
+	}
+}
 
 // Re-run order↔charge matching across every imported order using the current (wide) matcher. Use
 // after tuning the matcher, or to reconcile history: it upgrades orders sitting on a synthetic charge
@@ -169,6 +205,7 @@ export const syncGmail = action({
 // that gain a match. Batched to stay within per-mutation limits; safe to re-run.
 export const rematchOrders = action({
 	args: {},
+	returns: v.object({ scanned: v.number(), matched: v.number() }),
 	handler: async (ctx): Promise<{ scanned: number; matched: number }> => {
 		let cursor: string | null = null;
 		let scanned = 0;
