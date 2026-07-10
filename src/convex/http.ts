@@ -94,13 +94,20 @@ http.route({
 	path: '/plaid/webhook',
 	method: 'POST',
 	handler: httpAction(async (ctx, request) => {
-		let payload: { webhook_type?: string };
+		let payload: { webhook_type?: string; webhook_code?: string };
 		try {
 			payload = await request.json();
 		} catch {
 			return new Response('Bad request', { status: 400 });
 		}
-		if (payload.webhook_type === 'TRANSACTIONS') {
+		// Only sync on SYNC_UPDATES_AVAILABLE — the one code Plaid emits for the `/transactions/sync`
+		// cursor flow. Plaid fires several TRANSACTIONS codes per update cycle (DEFAULT_UPDATE,
+		// INITIAL_UPDATE, HISTORICAL_UPDATE — all legacy `/transactions/get` signals); acting on every
+		// one used to schedule ~3 concurrent, redundant syncs, each writing an identical syncRuns row.
+		if (
+			payload.webhook_type === 'TRANSACTIONS' &&
+			payload.webhook_code === 'SYNC_UPDATES_AVAILABLE'
+		) {
 			await ctx.scheduler.runAfter(0, internal.plaidActions.syncAllItemsInternal, {});
 		}
 		return new Response(null, { status: 200 });
